@@ -1,0 +1,28 @@
+defaults: 
+  - model: centerpoint
+  - _self_
+
+seed: 47020
+
+exp_id: ${model.name}_ep_${epochs}
+
+data_root: data/view_of_delft
+output_dir: outputs/${exp_id}
+
+checkpoint_path:
+
+class_namses: ['Car', 'Pedestrian', 'Cyclist']
+# trainer:
+num_workers: 2
+gpus: [0] # will change in code: torch.cuda.device_count()
+sync_bn: true
+batch_size: 2
+epochs: 50
+
+# log settings
+log_every: 50
+val_every: 3
+save_top_model: 5
+
+
+

@@ -1,0 +1,100 @@
+name: centerpoint
+exp_id: ${exp_id}
+
+data_root: ${data_root}
+class_names: ['Car', 'Pedestrian', 'Cyclist']
+point_cloud_range: [0, -25.6, -3, 51.2, 25.6, 2]
+voxel_size: [0.16, 0.16, 5]
+output_dir: ${output_dir}
+
+pts_voxel_layer:
+  max_num_points: 10
+  voxel_size: ${model.voxel_size}
+  point_cloud_range: ${model.point_cloud_range}
+  max_voxels: [16000, 40000]
+
+voxel_encoder:
+  in_channels: 4
+  feat_channels: [64]
+  with_distance: FALSE
+  voxel_size: ${model.voxel_size}
+  point_cloud_range: ${model.point_cloud_range}
+  
+middle_encoder:
+  in_channels: 64
+  output_shape: [320, 320]
+
+backbone: 
+  in_channels: 64
+  layer_nums: [3, 5, 5]
+  layer_strides: [2, 2, 2]
+  out_channels: [64, 128, 256]
+
+neck:
+  in_channels: [64, 128, 256]
+  upsample_strides: [1, 2, 4]
+  out_channels: [128, 128, 128]
+
+head:
+  in_channels: 384 # sum(128, 128, 128)
+  tasks: [
+    {num_class: 1, class_names: ['Car']},
+    {num_class: 1, class_names: ['Pedestrian']},
+    {num_class: 1, class_names: ['Cyclist']}
+    ]
+  common_heads:
+    reg: [2, 2]
+    height: [1, 2]
+    dim: [3, 2]
+    rot: [2, 2] # no need vel
+    heatmap: ~
+  share_conv_channel: 64
+  bbox_coder:
+    pc_range: ${model.point_cloud_range}
+    post_center_range: [-5, -30.6, -6, 56.2, 30.6, 5] #[-10, -49.68, -10, 79.12, 49.68, 10]
+    max_num: 350
+    score_threshold: 0.1
+    out_size_factor: 2
+    voxel_size: [0.16, 0.16]
+    code_size: 7
+  separate_head:
+    in_channels: ~
+    heads: ~
+    init_bias: -2.19
+    final_kernel: 3
+  loss_cls:
+    reduction: 'mean'
+    loss_weight: 1.0
+  loss_bbox: 
+    reduction: 'mean'
+    loss_weight: 0.25
+  norm_bbox: TRUE 
+  train_cfg:
+    grid_size: [320, 320, 1]
+    point_cloud_range: ${model.point_cloud_range}
+    voxel_size: ${model.voxel_size}
+    out_size_factor: 2
+    dense_reg: 1
+    gaussian_overlap: 0.1
+    max_objs: 500
+    min_radius: 2
+    code_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  test_cfg:
+    post_center_limit_range: [-5, -30.6, -6, 56.2, 30.6, 5]
+    max_per_img: 500
+    max_pool_nms: False
+    min_radius: [4, 0.3, 0.85]
+    score_threshold: 0.1
+    out_size_factor: 2
+    # voxel_size: ${model.voxel_size}
+    nms_type: 'circle'
+    pre_max_size: 1000
+    post_max_size: 83
+    nms_thr: 0.2
+
+
+# optimizer==>ADAMW
+optimizer:
+  lr: 0.001
+  weight_decay: 0.01 
+

@@ -1,0 +1,11 @@
+defaults: 
+  - model: centerpoint
+  - _self_
+exp_id: centerpoint_default
+
+seed: 47020
+gpus: [0] # will change in code: torch.cuda.device_count()
+num_workers: 2
+checkpoint_path: None
+data_root: data/view_of_delft
+output_dir: outputs/${exp_id}
