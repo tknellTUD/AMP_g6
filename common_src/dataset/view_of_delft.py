@@ -14,10 +14,11 @@ from torch.utils.data import Dataset
 from vod.configuration import KittiLocations
 from vod.frame import FrameDataLoader, FrameTransformMatrix, homogeneous_transformation
 
-from torchvision.models.segmentation import deeplabv3_resnet101
+from torchvision.models.segmentation import deeplabv3_resnet101, deeplabv3_mobilenet_v3_large
 from torchvision import transforms
 
 from PIL import Image
+import time
 
 # Added for testing
 import matplotlib
@@ -68,7 +69,7 @@ class ViewOfDelft(Dataset):
         self.vod_kitti_locations = KittiLocations(root_dir = data_root)
 
         # Loading the segmentation model
-        self.seg_model = deeplabv3_resnet101(pretrained=True).eval().cuda()
+        self.seg_model = deeplabv3_mobilenet_v3_large(pretrained=True).eval()
         self.seg_transform = transforms.Compose([
             transforms.Resize((512, 1024)),
             transforms.ToTensor(),
@@ -118,7 +119,7 @@ class ViewOfDelft(Dataset):
                 
                     gt_bboxes_3d_list.append(np.concatenate([bbox3d_locs, bbox3d_dims, bbox3d_rot], axis=0))
 
-        lidar_data = torch.tensor(lidar_data)
+        painted_lidar = torch.tensor(painted_lidar)
         
         if gt_bboxes_3d_list == []:
             gt_labels_3d = np.array([0])
@@ -147,8 +148,8 @@ class ViewOfDelft(Dataset):
     
     def get_segmentation(self, image_array):
         image = Image.fromarray(image_array)
-         # Getting the segmentation
-        input_tensor = self.seg_transform(image).unsqueeze(0).cuda()
+        # Getting the segmentation
+        input_tensor = self.seg_transform(image).unsqueeze(0)
         with torch.no_grad():
             sem_scores = self.seg_model(input_tensor)['out'].softmax(dim=1)  # [1, C, H, W]
         sem_scores = sem_scores.squeeze(0).permute(1, 2, 0).cpu().numpy()     # [H, W, C]
@@ -325,11 +326,15 @@ if __name__ == "__main__":
     # Test if Segmentation works
     dataset = ViewOfDelft()
     id = 658
+    start = time.time()
     data_658 = dataset[id]
+    end = time.time()
+    print(f"Time to load sample {id}: {end - start:.2f} seconds")
     image = data_658["image"]
     sem_scores = data_658["sem_scores"]
     painted_pc = data_658["lidar_data"]
-    save_painted_projection(painted_pc, id, "xy")
+    # 
+    # save_painted_projection(painted_pc, id, "xy")
     # The images get saved under outputs/
-    # save_segmentation_map(sem_scores, id)
+    save_segmentation_map(sem_scores, id)
     # save_image(image, id=id)
