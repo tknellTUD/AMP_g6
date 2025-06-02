@@ -173,6 +173,8 @@ class ViewOfDelft(Dataset):
         H, W, C = sem_scores.shape
 
         # Step 1: Transform to camera frame
+        lidar_points = lidar_points.copy()
+        lidar_points[:,3] = 1.0
         points_cam = (transform_matrix @ lidar_points.T).T  # shape: (N, 4)
 
         # Step 2: Project to image using camera matrix
@@ -183,13 +185,22 @@ class ViewOfDelft(Dataset):
         u = (pixels[:, 0] / z).astype(int)
         v = (pixels[:, 1] / z).astype(int)
 
+        # Rescale u and w to fit to different size segmentation
+        orig_H = 1216
+        orig_W = 1936
+        H, W, _ = sem_scores.shape  # resized seg map shape (e.g., 512, 1024)
+
+        # Rescale u and v from original image scale to segmentation map scale
+        u_scaled= (u * W / orig_W).astype(int)
+        v_scaled = (v * H / orig_H).astype(int)
+
         # Step 3: Check image bounds
-        in_bounds = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        in_bounds = (u_scaled >= 0) & (u_scaled < W) & (v_scaled >= 0) & (v_scaled < H)
         final_mask = valid_mask & in_bounds
 
         # Step 4: Retrieve segmentation scores
         seg = np.zeros((lidar_points.shape[0], C), dtype=np.float32)
-        seg[final_mask] = sem_scores[v[final_mask], u[final_mask], :]  # fast lookup
+        seg[final_mask] = sem_scores[v_scaled[final_mask], u_scaled[final_mask], :]  # fast lookup
 
         # Step 5: Concatenate painted features
         painted = np.hstack([lidar_points, seg])  # (N, 4 + C)
@@ -225,6 +236,90 @@ def save_segmentation_map(sem_scores, id=0, output_dir="outputs"):
 
     plt.imsave(os.path.join(output_dir, f"segmentation_{id}.png"), color_seg_map)
 
+def save_painted_projection(painted_lidar, id=0, projection_axis='xy'):
+    """
+    Visualize and save a top-down or front view of painted point cloud.
+
+    Args:
+        painted_lidar: (N, 4+C) array — original LiDAR + semantic scores
+        id: identifier for saving
+        projection_axis: 'xy', 'xz', or 'yz' for different views
+    """
+
+    coords = painted_lidar[:, :3]
+    sem_scores = painted_lidar[:, 4:]  # skip intensity
+    num_points = coords.shape[0]
+
+    # Determine dominant semantic label
+    dominant_class = np.argmax(sem_scores, axis=1)
+    is_painted = sem_scores.sum(axis=1) > 0.001
+
+    # Assign color per point
+    color_map = np.array([
+        [0.5, 0.5, 0.5],  # 0: background → gray
+        [1.0, 0.0, 0.0],  # 1: person     → red
+        [0.0, 1.0, 0.0],  # 2: car        → green
+        [0.0, 0.0, 1.0],  # 3: bicycle    → blue
+    ])
+
+    # Default to black for unpainted
+    point_colors = np.zeros((num_points, 3))  # black
+    point_colors[is_painted] = color_map[dominant_class[is_painted]]
+
+    # Select projection
+    if projection_axis == 'xy':
+        x, y = coords[:, 0], coords[:, 1]
+    elif projection_axis == 'xz':
+        x, y = coords[:, 0], coords[:, 2]
+    elif projection_axis == 'yz':
+        x, y = coords[:, 1], coords[:, 2]
+    else:
+        raise ValueError("Invalid projection_axis")
+
+    # Plot
+    plt.figure(figsize=(10, 8))
+    plt.scatter(x, y, c=point_colors, s=0.5)
+    plt.axis('equal')
+    plt.title(f"Painted Point Cloud Projection ({projection_axis}-view)")
+    plt.xlabel(projection_axis[0])
+    plt.ylabel(projection_axis[1])
+    plt.savefig(f"outputs/painted_pc_{projection_axis}_{id}.png", dpi=300)
+    plt.close()
+
+
+def visualize_painted_pointcloud(painted_lidar, class_names=["bg", "person", "car", "bike"]):
+    # painted_lidar shape: (N, 4 + C), where first 3 are x,y,z and last C are semantic scores
+    xyz = painted_lidar[:, :3]
+    seg_scores = painted_lidar[:, 4:]  # skip [x, y, z, r]
+
+    labels = np.argmax(seg_scores, axis=1)
+    confidence = np.max(seg_scores, axis=1)
+
+    # If all scores are zero, assign label -1 (for unpainted)
+    labels[confidence == 0] = -1
+
+    # Define colors
+    color_map = {
+        -1: [0, 0, 0],         # black for unpainted
+         0: [0.5, 0.5, 0.5],   # grey for background
+         1: [1.0, 0, 0],       # red for person
+         2: [0, 1.0, 0],       # green for car
+         3: [0, 0, 1.0],       # blue for bike
+    }
+
+    colors = np.array([color_map[label] for label in labels])
+
+    # Plot
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], c=colors, s=1)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Painted Point Cloud Visualization')
+    plt.tight_layout()
+    plt.savefig("painted_pointcloud.png")
+    plt.close()
 
 if __name__ == "__main__":
     # Test if Segmentation works
@@ -233,7 +328,8 @@ if __name__ == "__main__":
     data_658 = dataset[id]
     image = data_658["image"]
     sem_scores = data_658["sem_scores"]
-
+    painted_pc = data_658["lidar_data"]
+    save_painted_projection(painted_pc, id, "xy")
     # The images get saved under outputs/
-    save_segmentation_map(sem_scores, id)
-    save_image(image, id=id)
+    # save_segmentation_map(sem_scores, id)
+    # save_image(image, id=id)
