@@ -24,6 +24,22 @@ middle_encoder:
   in_channels: 64
   output_shape: [320, 320]
 
+#added
+hat:
+  dim: 64
+  num_heads: 8
+  height_bins: 1
+
+se_fusion:
+  in_channels: 448
+  reduction: 64
+
+ldc:
+  bev_channels: 384
+
+#end added
+
+
 backbone: 
   in_channels: 64
   layer_nums: [3, 5, 5]

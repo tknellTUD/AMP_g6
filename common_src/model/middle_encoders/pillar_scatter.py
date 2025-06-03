@@ -93,4 +93,4 @@ class PointPillarsScatter(nn.Module):
         batch_canvas = batch_canvas.view(batch_size, self.in_channels, self.ny,
                                          self.nx)
 
-        return batch_canvas
+        return batch_canvas # 

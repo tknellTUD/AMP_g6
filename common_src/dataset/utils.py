@@ -5,11 +5,13 @@ def collate_vod_batch(batch):
     meta_list = []
     for idx, sample in enumerate(batch):
         pts_list.append(sample['lidar_data'])
+        img = sample['stereo_camera']
         gt_labels_3d_list.append(sample['gt_labels_3d'])
         gt_bboxes_3d_list.append(sample['gt_bboxes_3d'])
         meta_list.append(sample['meta'])
     return dict(
         pts = pts_list,
+        img = img,
         gt_labels_3d = gt_labels_3d_list,
         gt_bboxes_3d = gt_bboxes_3d_list,
         metas = meta_list

@@ -136,4 +136,4 @@ class PillarFeatureNet(nn.Module):
         for pfn in self.pfn_layers:
             features = pfn(features, num_points)
 
-        return features.squeeze(1)
+        return features.squeeze(1) # [N, C] where C is output features per pillar

@@ -3,8 +3,7 @@
 #SBATCH --partition=gpu-a100-small
 #SBATCH --time=4:00:00
 
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem-per-cpu=4G
 #SBATCH --gpus-per-task=1

@@ -10,8 +10,7 @@ from collections import OrderedDict
 
 from vod.evaluation import Evaluation
 from vod.configuration import KittiLocations
-from vod.frame import FrameDataLoader, FrameTransformMatrix, homogeneous_transformation
-
+from vod.frame import FrameDataLoader, FrameTransformMatrix
 
 import lightning as L
 import torch.distributed as dist
@@ -22,12 +21,16 @@ from common_src.model.middle_encoders import PointPillarsScatter
 from common_src.model.backbones import SECOND
 from common_src.model.necks import SECONDFPN
 from common_src.model.heads import CenterHead
+from common_src.model.middle_encoders.HyDRa.height_association_transformer import HeightAssociationTransformer
+from common_src.model.middle_encoders.HyDRa.SE_fusion import SEFusion
+from common_src.model.middle_encoders.HyDRa.back_projection import LidarDepthRefiner
+from common_src.model.backbones.img_backbone import ImageBackbone
 
 class CenterPoint(L.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.save_hyperparameters()
-        
+    
         self.img_shape = torch.tensor([1936 , 1216])
         self.data_root = config.get('data_root', None)
         self.class_names = config.get('class_names', None)
@@ -37,6 +40,12 @@ class CenterPoint(L.LightningModule):
         voxel_layer_config = config.get('pts_voxel_layer', None)
         voxel_encoder_config = config.get('voxel_encoder', None)
         middle_encoder_config = config.get('middle_encoder', None)
+
+        #Added
+        hat_config = config.get('hat', None)
+        se_fusion_config = config.get('se_fusion', None)
+        ldc_config = config.get('ldc', None)
+
         backbone_config = config.get('backbone', None)
         neck_config = config.get('neck', None)
         head_config = config.get('head', None)
@@ -45,6 +54,8 @@ class CenterPoint(L.LightningModule):
         self.voxel_encoder = PillarFeatureNet(**voxel_encoder_config)
         self.middle_encoder = PointPillarsScatter(**middle_encoder_config)
         self.backbone = SECOND(**backbone_config)
+        self.image_backbone = ImageBackbone(out_channels=4)
+        self.depth_pos_encoding = torch.nn.Parameter(torch.randn(64, 4))  # Example depth encoding, adjust as needed
         self.neck = SECONDFPN(**neck_config)
         self.head = CenterHead(**head_config)
         
@@ -57,6 +68,15 @@ class CenterPoint(L.LightningModule):
         self.inference_mode = config.get('inference_mode', 'val')
         self.save_results = config.get('save_preds_results', False)
         self.val_results_list =[]
+
+        self.image_backbone = ImageBackbone()  # e.g., ResNet, Swin, etc.
+        print("HAT Config:", config.get('hat', None))
+        self.hat = HeightAssociationTransformer(hat_config)
+        print(se_fusion_config)
+        self.se_fusion = SEFusion(se_fusion_config)
+        print(ldc_config)
+        self.ldc = LidarDepthRefiner(ldc_config)
+
         
     ## Voxelization
     def voxelize(self, points):
@@ -79,7 +99,7 @@ class CenterPoint(L.LightningModule):
 
         return voxel_dict
     
-    def _model_forward(self, pts_data):
+    def _model_forward(self, pts_data, img_data=None, batch_idx=None):
 
         voxel_dict = self.voxelize(pts_data)
     
@@ -89,18 +109,41 @@ class CenterPoint(L.LightningModule):
     
         voxel_features = self.voxel_encoder(voxels, num_points, coors)
         bs = coors[-1,0].item() + 1
-        bev_feats = self.middle_encoder(voxel_features, coors, bs)        
-        backbone_feats = self.backbone(bev_feats)
+        bev_feats_lidar = self.middle_encoder(voxel_features, coors, bs)
+        lidar_data = pts_data
+
+        
+        # Image path (skip if img_data is None)
+        if img_data is not None:
+            # 1. Extract image features
+            image_queries, H, W = self.img_features(img_data)  # [B, N, H, W, C] -> [B*N*H, W, C]
+            
+            # 2. Apply HAT: fuse image features with LiDAR features
+            # reshape voxel_features to match image perspective format if needed
+            lidar_seq = self.extract_lidar_uvz_features(
+                lidar_pc_lidar=lidar_data,           # [N, 4 + semantic scores]
+                batch_idx = batch_idx,      # [4, 4]
+                image_shape=(H, W),                   # size of sem_scores or image
+                feature_dim=lidar_data.shape[1]    # preserve full painted features
+                )
+
+            # Perform cross-attention between image queries and LiDAR sequence
+            fused_bev = self.hat(image_queries, lidar_seq)
+        else:
+            fused_bev = bev_feats_lidar
+
+        backbone_feats = self.backbone(fused_bev)
         neck_feats = self.neck(backbone_feats)
         ret_dict = self.head(neck_feats)
         return ret_dict
     
     def training_step(self, batch, batch_idx):
         pts_data = batch['pts']
+        img_data = batch['img']
         gt_label_3d = batch['gt_labels_3d']
         gt_bboxes_3d = batch['gt_bboxes_3d']
         
-        ret_dict = self._model_forward(pts_data)
+        ret_dict = self._model_forward(pts_data, img_data, batch_idx)
         loss_input = [gt_bboxes_3d, gt_label_3d, ret_dict]
         
         losses = self.head.loss(*loss_input)
@@ -168,6 +211,122 @@ class CenterPoint(L.LightningModule):
             losses = log_vars
         ))
     
+    def extract_lidar_uvz_features(self, lidar_pc_lidar, batch_idx, image_shape, feature_dim=4):
+        """
+        From raw LiDAR points, return valid projected pixel x-coords (u), depth (z), and point features.
+
+        Args:
+            lidar_pc_lidar (np.ndarray): shape (N, 4+C), where first 4 = (x, y, z, intensity)
+            transform_matrix (np.ndarray): (4, 4) LiDAR-to-camera transform
+            projection_matrix (np.ndarray): (3, 4) camera projection matrix
+            image_shape (tuple): (H, W)
+            feature_dim (int): Number of features to keep (default: 4)
+
+        Returns:
+            output (np.ndarray): shape (N_valid, 1 + 1 + C), i.e., [u, z, features]
+        """
+        print(f"T_camera_LiDAR:\n{transform_matrix}")
+        print(f"P_camera:\n{projection_matrix}")
+        H, W = 1216,1936
+        N = lidar_pc_lidar.shape[0]
+
+        vod_frame_data = FrameDataLoader(kitti_locations=self.vod_kitti_locations, frame_number=batch_idx)
+        local_transforms = FrameTransformMatrix(vod_frame_data)
+        transform_matrix = local_transforms.t_camera_lidar
+        projection_matrix = local_transforms.camera_projection_matrix
+        # Ensure the fourth feature of lidar_pc_camera is set to 1
+        intensities = lidar_pc_lidar[:, 3].copy()
+        lidar_pc_lidar[:, 3] = 1
+
+        # Step 1: Transform to camera frame
+        lidar_pc_camera = transform_matrix.dot(lidar_pc_lidar.T).T  # shape: (N, 4)  # [N, 4 + C]
+        print("Min x, y, z values for lidar_pc_lidar:", lidar_pc_lidar[:, :3].min(axis=0))
+        print("Max x, y, z values for lidar_pc_lidar:", lidar_pc_lidar[:, :3].max(axis=0))
+        print("Min x, y, z values for lidar_pc_camera:", lidar_pc_camera[:, :3].min(axis=0))
+        print("Max x, y, z values for lidar_pc_camera:", lidar_pc_camera[:, :3].max(axis=0))
+        
+        # Step 2: Project to image plane
+        # pixels = (projection_matrix @ lidar_pc_camera.T).T  # [N, 3]
+        pixels = (projection_matrix @ lidar_pc_camera.T).T
+        print("Pixels shape:", pixels.shape)
+        z = pixels[:, 2]  # Depth in camera frame
+        valid_mask = z > 0
+        u = (pixels[:, 0] / z).astype(int)
+        v = (pixels[:, 1] / z).astype(int)
+
+        # Step 3: Check image bounds
+        in_bounds = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        final_mask = valid_mask & in_bounds
+
+        lidar_pc_camera[:, 3] = intensities
+        feats_valid = lidar_pc_camera[final_mask, :feature_dim]  # [N_valid, C]
+
+        u_valid = u[final_mask].reshape(-1, 1)  # Extract valid u values
+        z_valid = z[final_mask].reshape(-1, 1)  # Extract valid z values
+
+        num_W_bins = image_shape[1]  # W
+
+        num_D_bins = 76  # D
+        z_max = 100
+        depth_bin_size = z_max / num_D_bins
+
+        # Clip depth values to the fixed range
+        z_valid = np.clip(z_valid, 0, z_max)
+
+        # Step 4: Bin the valid points width and depth wise
+        binned_features = np.zeros((1, 1, 1, num_W_bins, num_D_bins, feature_dim), dtype=np.float32)
+        binned_features = torch.tensor(binned_features)  # If it's NumPy
+        bin_counts = np.zeros((1, 1, 1, num_W_bins, num_D_bins), dtype=np.int32)
+
+        depth_bin_size = z_valid.max() / num_D_bins
+        # Overlay valid points on the image
+        import matplotlib.pyplot as plt
+
+        # Extract valid u and v coordinates
+        v_valid = v[final_mask].reshape(-1, 1)
+
+        # Load the image for visualization
+        
+        # Bin the valid points width and depth-wise
+        for i in range(u_valid.shape[0]):
+            u_bin = u_valid[i, 0]
+            d_bin = int(z_valid[i, 0] / depth_bin_size)
+
+            if 0 <= u_bin < num_W_bins and 0 <= d_bin < num_D_bins:
+                if bin_counts[0, 0, 0, u_bin, d_bin] < 10:  # Limit max points per bin
+                    binned_features[0, 0, 0, u_bin, d_bin] += feats_valid[i]
+                    bin_counts[0, 0, 0, u_bin, d_bin] += 1
+
+        nonzero_mask = bin_counts > 0
+        binned_features[nonzero_mask] /= bin_counts[nonzero_mask].reshape(-1, 1)
+        
+        output = np.concatenate([u_valid, z_valid, feats_valid], axis=1)  # [N_valid, 1 + 1 + C]
+
+        print(f"binned_features shape: {binned_features.shape}")
+        # Perform positional encoding
+        B, N, _, W, D, C = binned_features.shape
+        lidar_seq = binned_features.view(B * N * W, D, C)
+
+        lidar_seq += self.depth_pos_encoding.unsqueeze(0).unsqueeze(0)  # Add depth positional encoding
+        
+
+        return lidar_seq
+    
+    def img_features(self, img_data):
+        img_data = torch.tensor(img_data, dtype=torch.float32).permute(2, 0, 1)  # [C, H, W]
+        img_data = img_data.unsqueeze(0).unsqueeze(0)  # [1, 1, C, H, W] for batch size 1 and num cams 1
+        print(f"Image data shape: {img_data.shape}")
+        img_feats = self.image_backbone(img_data)  # [B, N, H, W, C]
+        print(f"Image features shape: {img_feats.shape}")
+        # Reshape to [B, N, H, W, C] where B=1, N=1 (single camera), H=H, W=W, C=C
+
+        B, N, H, W, C = img_feats.shape
+        height_queries = img_feats.view(B * N * W, H, C)
+        print(f"Height queries shape: {height_queries.shape}")
+        return height_queries, H, W
+
+    
+
     def on_validation_epoch_end(self):
         if (not self.save_results) or self.training: 
             tmp_dir = tempfile.TemporaryDirectory()
@@ -214,7 +373,7 @@ class CenterPoint(L.LightningModule):
         if isinstance(tmp_dir, tempfile.TemporaryDirectory):
             tmp_dir.cleanup() 
         return results
-            
+        
         # detection_annotation_file = results_path
         
     def format_results(self, 
@@ -390,8 +549,32 @@ class CenterPoint(L.LightningModule):
                 scores=np.zeros([0]),
                 label_preds=np.zeros([0, 4]),
                 sample_idx=sample_idx)
-        
-        
-        
-        
-        
+
+# if __name__ == '__main__':
+#     import sys
+#     import os
+#     import yaml
+
+#     # Add the parent directory to the Python path
+#     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+#     print("Yaaaaa")
+#     # Load configuration from YAML file
+#     config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../config/model/centerpoint.yaml'))
+#     with open(config_path, 'r') as f:
+#         config = yaml.safe_load(f)
+
+#     from common_src.dataset import ViewOfDelft, FrameDataLoader
+#     centerpoint = CenterPoint(config=config)
+
+#     dataset = ViewOfDelft(data_root='data/view_of_delft', split='train')
+#     vod_frame_data = FrameDataLoader(kitti_locations=dataset.vod_kitti_locations, 
+#                                      frame_number='01545')
+    
+#     img_data = vod_frame_data.image  # [H, W, C]
+#     pts_data = vod_frame_data.lidar  # [N, 4 + C]
+
+#     ret_dict = centerpoint._model_forward(
+#         pts_data=[pts_data], 
+#         img_data=[img_data], 
+#         batch_idx=1545
+#     )
