@@ -162,10 +162,10 @@ class CenterPoint(L.LightningModule):
             self.log(f'validation/{loss_name}', loss_value, batch_size=1, sync_dist=True)
         # task0.loss_heatmap', 'task0.loss_bbox', 'task1.loss_heatmap', 'task1.loss_bbox', 'task2.loss_heatmap', 'task2.loss_bbox', 'loss'
         self.val_results_list.append(dict(
-            sample_idx = batch['metas'][0]['num_frame'],
-            input_batch = batch,
-            bbox_results = bbox_results,
-            losses = log_vars
+            sample_idx=batch['metas'][0]['num_frame'],
+            meta=batch['metas'][0],
+            bbox_results=bbox_results,
+            losses=log_vars,
         ))
     
     def on_validation_epoch_end(self):
@@ -228,10 +228,10 @@ class CenterPoint(L.LightningModule):
         for result in outputs:
             sample_idx = result['sample_idx']
             res_dict = result['bbox_results']
-            input_batch = result['input_batch']
-            
+            meta = result['meta']
+
             annos = []
-            box_dict = self.convert_valid_bboxes(res_dict[0], input_batch)
+            box_dict = self.convert_valid_bboxes(res_dict[0], meta)
             
             anno = {                 
                 'name': [],
@@ -312,13 +312,14 @@ class CenterPoint(L.LightningModule):
             print(f'Result is saved to {out}.')
         return det_annos
         
-    def convert_valid_bboxes(self, box_dict, input_batch):
-        # Convert the predicted bounding boxes to the format required by the evaluation metric
-        # This function should be implemented based on the specific requirements of your dataset
+    def convert_valid_bboxes(self, box_dict, meta):
+        # Convert the predicted bounding boxes to the format required by the
+        # evaluation metric. Only metadata for the current sample is required
+        # to perform the coordinate transforms.
         box_preds = box_dict['bboxes_3d']
         scores = box_dict['scores_3d']
         labels = box_dict['labels_3d']
-        sample_idx = input_batch['metas'][0]['num_frame']
+        sample_idx = meta['num_frame']
         
         vod_frame_data = FrameDataLoader(kitti_locations=self.vod_kitti_locations, frame_number=sample_idx)
         local_transforms = FrameTransformMatrix(vod_frame_data)
