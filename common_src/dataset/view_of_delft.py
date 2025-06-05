@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import Dataset
 
 from vod.configuration import KittiLocations
-from vod.frame import FrameDataLoader, FrameTransformMatrix#, homogeneous_transformation
+from vod.frame import FrameDataLoader, FrameTransformMatrix, homogeneous_transformation
 
 class ViewOfDelft(Dataset):
     CLASSES = ['Car', 
@@ -45,7 +45,7 @@ class ViewOfDelft(Dataset):
                  sequential_loading=False,
                  split = 'train'):
         super().__init__()
-        
+
         self.data_root = data_root
         assert split in ['train', 'val', 'test'], f"Invalid split: {split}. Must be one of ['train', 'val', 'test']"
         self.split = split
@@ -60,14 +60,15 @@ class ViewOfDelft(Dataset):
         return len(self.sample_list)
 
     def __getitem__(self, idx):
+        print(f"IDX: {idx}")
         num_frame = self.sample_list[idx]
         vod_frame_data = FrameDataLoader(kitti_locations=self.vod_kitti_locations,
                                          frame_number=num_frame)
         local_transforms = FrameTransformMatrix(vod_frame_data)
         
-        lidar_data = vod_frame_data.lidar_data
+        lidar_data = torch.tensor(vod_frame_data.lidar_data)
 
-        
+
         gt_labels_3d_list = []
         gt_bboxes_3d_list = []
         if self.split != 'test':
@@ -89,8 +90,6 @@ class ViewOfDelft(Dataset):
                     bbox3d_rot = np.array([label[self.LABEL_MAPPING['bbox3d_rotation']]], dtype=np.float32)
                 
                     gt_bboxes_3d_list.append(np.concatenate([bbox3d_locs, bbox3d_dims, bbox3d_rot], axis=0))
-
-        lidar_data = torch.tensor(lidar_data)
         
         if gt_bboxes_3d_list == []:
             gt_labels_3d = np.array([0])
@@ -104,23 +103,23 @@ class ViewOfDelft(Dataset):
             box_dim=gt_bboxes_3d.shape[-1],
             origin=(0.5, 0.5, 0))
         
-        gt_labels_3d = torch.tensor(gt_labels_3d)
+        gt_labels_3d = torch.tensor(gt_labels_3d, dtype=torch.float32)  # Ensure float32 data type
         
         stereo_camera = vod_frame_data.image #[H, W, C]
-        stereo_camera = torch.tensor(stereo_camera, dtype=torch.float32).permute(2, 0, 1)
-        # [C, H, W] -> [B, N, C, H, W]
-        stereo_camera = stereo_camera.unsqueeze(0).unsqueeze(0) # [1, 1, C, H, W]
-
+        print(f"Stereo camera shape: {stereo_camera.shape}")
+        stereo_camera = torch.tensor(stereo_camera, dtype=torch.float32)  # Ensure float32 data type  # [1, C, H, W] for num cams 1
+        print(f"Stereo camera tensor shape: {stereo_camera.shape}")
         return dict(
             lidar_data = lidar_data,
             stereo_camera = stereo_camera,
             gt_labels_3d = gt_labels_3d,
             gt_bboxes_3d = gt_bboxes_3d,
             meta = dict(
-                num_frame = num_frame 
+            num_frame = num_frame 
             )
         )
-    
+
+
 def forward_projection(self, img_feats_fused):
     """
     Dummy version: Averages image features and reshapes into BEV.
@@ -273,7 +272,7 @@ def extract_lidar_uvz_features(lidar_pc_lidar, transform_matrix, projection_matr
     binned_features = np.zeros((1, 1, num_W_bins, num_D_bins, feature_dim), dtype=np.float32)
     bin_counts = np.zeros((1, 1, num_W_bins, num_D_bins), dtype=np.int32)
 
-    depth_bin_size = z_valid.max() / num_D_bins
+    depth_bin_size = z_max / num_D_bins
     # Overlay valid points on the image
     import matplotlib.pyplot as plt
 

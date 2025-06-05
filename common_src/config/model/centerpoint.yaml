@@ -28,7 +28,6 @@ middle_encoder:
 hat:
   dim: 64
   num_heads: 8
-  height_bins: 1
 
 se_fusion:
   in_channels: 448

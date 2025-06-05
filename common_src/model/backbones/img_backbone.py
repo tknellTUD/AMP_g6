@@ -3,7 +3,7 @@ import torch.nn as nn
 from torchvision.models import resnet18
 
 class ImageBackbone(nn.Module):
-    def __init__(self, out_channels=128):
+    def __init__(self, out_channels=64):
         super().__init__()
         resnet = resnet18(pretrained=False)
         resnet.load_state_dict(torch.load('common_src/model/middle_encoders/HyDRa/resnet18.pth', map_location='cpu'))
@@ -20,14 +20,12 @@ class ImageBackbone(nn.Module):
 
     def forward(self, imgs):
         """
-        imgs: [B, N, 3, H, W]
+        imgs: [B, H, W, C]
         Returns: [B, N, H_out, W_out, C]
         """
-        B, N, C, H, W = imgs.shape
-        imgs = imgs.view(B * N, C, H, W)  # flatten batch and camera dims
+        B, H, W, C = imgs.shape
+        imgs = imgs.view(B, C, H, W)  # reshape to [B, H, W, 1, C]
+        print(f"imgs shape after reshape: {imgs.shape}")
         feats = self.encoder(imgs)
-        feats = self.output_conv(feats)  # [B*N, C_out, H_feat, W_feat]
-        C_out, H_out, W_out = feats.shape[1:]
-        feats = feats.view(B, N, C_out, H_out, W_out)
-        feats = feats.permute(0, 1, 3, 4, 2)  # [B, N, H, W, C]
+        feats = self.output_conv(feats)  # [B, C_out, H_feat, W_feat]
         return feats

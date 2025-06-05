@@ -10,7 +10,7 @@ from collections import OrderedDict
 
 from vod.evaluation import Evaluation
 from vod.configuration import KittiLocations
-from vod.frame import FrameDataLoader, FrameTransformMatrix
+from vod.frame import FrameDataLoader, FrameTransformMatrix, homogeneous_transformation
 
 import lightning as L
 import torch.distributed as dist
@@ -24,6 +24,7 @@ from common_src.model.heads import CenterHead
 from common_src.model.middle_encoders.HyDRa.height_association_transformer import HeightAssociationTransformer
 from common_src.model.middle_encoders.HyDRa.SE_fusion import SEFusion
 from common_src.model.middle_encoders.HyDRa.back_projection import LidarDepthRefiner
+from common_src.model.middle_encoders.HyDRa.zeroinit import ZeroInitLayerNorm
 from common_src.model.backbones.img_backbone import ImageBackbone
 
 class CenterPoint(L.LightningModule):
@@ -54,8 +55,11 @@ class CenterPoint(L.LightningModule):
         self.voxel_encoder = PillarFeatureNet(**voxel_encoder_config)
         self.middle_encoder = PointPillarsScatter(**middle_encoder_config)
         self.backbone = SECOND(**backbone_config)
-        self.image_backbone = ImageBackbone(out_channels=4)
-        self.depth_pos_encoding = torch.nn.Parameter(torch.randn(64, 4))  # Example depth encoding, adjust as needed
+        self.image_backbone = ImageBackbone(out_channels=64)
+        self.lidar_channel_expansion = torch.nn.Linear(4, 64)  # Expand LiDAR features to 64 channels
+        self.zero_init_layer_norm = ZeroInitLayerNorm(64)  # Initialize LayerNorm with zero weights
+
+        self.depth_pos_encoding = torch.nn.Parameter(torch.randn(76, 4))  # Example depth encoding, adjust as needed
         self.neck = SECONDFPN(**neck_config)
         self.head = CenterHead(**head_config)
         
@@ -69,7 +73,6 @@ class CenterPoint(L.LightningModule):
         self.save_results = config.get('save_preds_results', False)
         self.val_results_list =[]
 
-        self.image_backbone = ImageBackbone()  # e.g., ResNet, Swin, etc.
         print("HAT Config:", config.get('hat', None))
         self.hat = HeightAssociationTransformer(hat_config)
         print(se_fusion_config)
@@ -99,51 +102,78 @@ class CenterPoint(L.LightningModule):
 
         return voxel_dict
     
-    def _model_forward(self, pts_data, img_data=None, batch_idx=None):
+    def _model_forward(self, lidar_data=None, img_data=None, frame_idx=None):
 
-        voxel_dict = self.voxelize(pts_data)
+        #voxel_dict = self.voxelize(pts_data)
     
-        voxels = voxel_dict['voxels']
-        num_points = voxel_dict['num_points']
-        coors = voxel_dict['coors']
+        # voxels = voxel_dict['voxels']
+        # num_points = voxel_dict['num_points']
+        # coors = voxel_dict['coors']
     
-        voxel_features = self.voxel_encoder(voxels, num_points, coors)
-        bs = coors[-1,0].item() + 1
-        bev_feats_lidar = self.middle_encoder(voxel_features, coors, bs)
-        lidar_data = pts_data
+        # voxel_features = self.voxel_encoder(voxels, num_points, coors)
+        # bs = coors[-1,0].item() + 1
+        # bev_feats_lidar = self.middle_encoder(voxel_features, coors, bs)
 
         
         # Image path (skip if img_data is None)
-        if img_data is not None:
-            # 1. Extract image features
-            image_queries, H, W = self.img_features(img_data)  # [B, N, H, W, C] -> [B*N*H, W, C]
-            
-            # 2. Apply HAT: fuse image features with LiDAR features
-            # reshape voxel_features to match image perspective format if needed
-            lidar_seq = self.extract_lidar_uvz_features(
-                lidar_pc_lidar=lidar_data,           # [N, 4 + semantic scores]
-                batch_idx = batch_idx,      # [4, 4]
-                image_shape=(H, W),                   # size of sem_scores or image
-                feature_dim=lidar_data.shape[1]    # preserve full painted features
-                )
+        # if img_data is not None:
+        # 1. Extract image features
+        print(f"Image data shape: {img_data[0].shape}")
 
-            # Perform cross-attention between image queries and LiDAR sequence
-            fused_bev = self.hat(image_queries, lidar_seq)
-        else:
-            fused_bev = bev_feats_lidar
+        img_data = torch.stack(img_data, dim=0)  # Stack the list of image tensors along a new dimension
 
+        print(f"Image data shape after stacking: {img_data.shape}")  # [B, N, C, H, W]
+        image_queries, H_feat, W_feat = self.img_features(img_data)  # [B, N, H, W, C] -> [B*N*H, W, C]
+        print(f"Image queries shape: {image_queries.shape}")  # [B*N*H, W, C]
+        W = image_queries[2]
+        lidar_features= []
+        for pc in lidar_data:
+            # 2. Extract LiDAR features
+            lidar_pc_lidar = pc[:, :4]
+            lidar_features.append(self.extract_lidar_uvz_features_torch(lidar_pc_lidar,
+                frame_idx=frame_idx,
+                image_shape=(H_feat, W_feat),
+                feature_dim=4,
+                z_max=100.0,
+                num_D_bins=76))
+            print(f"Extracted LiDAR features shape: {lidar_features[-1].shape}")  # [1, 1, 1, W, D, C]
+        # lidar_features = self.extract_lidar_uvz_features_torch(lidar_pc_lidar, frame_idx, (H_feat, W_feat), feature_dim=4)
+
+        binned_lidar = torch.stack(lidar_features, dim=0)  # [B, W, D, C]
+        B_lidar, W_lidar, D_lidar, C_lidar = binned_lidar.shape
+        lidar_seq = binned_lidar.view(B_lidar*W_lidar, D_lidar, C_lidar)
+        print(f"Binned LiDAR shape: {binned_lidar.shape}")
+
+        # Perform positional encoding on LiDAR features
+        lidar_seq += self.depth_pos_encoding  # Add depth positional encoding
+
+
+        # Apply the layer to expand LiDAR features to 64 channels
+        lidar_seq = self.lidar_channel_expansion(lidar_seq)
+        
+        # Perform cross-attention between image queries and LiDAR sequence
+        fused_bev = self.hat(image_queries, lidar_seq)
+        delta = self.zero_init_layer_norm(fused_bev)  # Apply zero-initialized LayerNorm
+        fused_bev = image_queries + delta  # Add residual connection
+        BW, H, C = fused_bev.shape
+        W = 121
+        B = BW // W
+        fused_bev = fused_bev.view(B, C, H, W)  # Reshape to [B, C, H, W]
+        print(f"Fused BEV shape: {fused_bev.shape}")  # [B, C, H, W]
         backbone_feats = self.backbone(fused_bev)
         neck_feats = self.neck(backbone_feats)
         ret_dict = self.head(neck_feats)
         return ret_dict
     
     def training_step(self, batch, batch_idx):
-        pts_data = batch['pts']
-        img_data = batch['img']
+        print(f"Training step {batch_idx} with batch size {len(batch['pts'])}")
+        lidar_pts = batch['lidar_data']
+        img_data = batch['stereo_camera']
+        num_frame = batch['metas'][0]['num_frame']
         gt_label_3d = batch['gt_labels_3d']
         gt_bboxes_3d = batch['gt_bboxes_3d']
-        
-        ret_dict = self._model_forward(pts_data, img_data, batch_idx)
+        print(f"Training step batch input img_data shape; {img_data[0].shape}")
+        ret_dict = self._model_forward(lidar_pts, img_data, num_frame)
         loss_input = [gt_bboxes_3d, gt_label_3d, ret_dict]
         
         losses = self.head.loss(*loss_input)
@@ -170,13 +200,15 @@ class CenterPoint(L.LightningModule):
     
     
     def validation_step(self, batch, batch_idx):
-        assert len(batch['pts']) == 1, 'Batch size should be 1 for validation'
-        pts_data = batch['pts']
-        metas = batch['metas']
+        assert len(batch['lidar_data']) == 1, 'Batch size should be 1 for validation'
+        lidar_pts = batch['lidar_data']
+        img_data = batch['stereo_camera']
+        num_frame = batch['metas'][0]['num_frame']
         gt_label_3d = batch['gt_labels_3d']
         gt_bboxes_3d = batch['gt_bboxes_3d']
-        
-        ret_dict = self._model_forward(pts_data)
+        print(f"Validation step batch input img_data shape; {img_data[0].shape}")
+        print(f"Validation step batch length: {len(batch['lidar_data'])}, num_frame: {num_frame}") 
+        ret_dict = self._model_forward(lidar_pts, img_data, num_frame)
         loss_input = [gt_bboxes_3d, gt_label_3d, ret_dict]
         
         bbox_list = self.head.get_bboxes(ret_dict, img_metas=metas)
@@ -186,7 +218,7 @@ class CenterPoint(L.LightningModule):
                  scores_3d = scores, 
                  labels_3d = labels)
             for bboxes, scores, labels in bbox_list
-        ]
+            ]
 
         losses = self.head.loss(*loss_input)
         
@@ -210,8 +242,9 @@ class CenterPoint(L.LightningModule):
             bbox_results = bbox_results,
             losses = log_vars
         ))
+
     
-    def extract_lidar_uvz_features(self, lidar_pc_lidar, batch_idx, image_shape, feature_dim=4):
+    def extract_lidar_uvz_features(self, lidar_pc_lidar, frame_idx, image_shape, feature_dim=4):
         """
         From raw LiDAR points, return valid projected pixel x-coords (u), depth (z), and point features.
 
@@ -225,18 +258,12 @@ class CenterPoint(L.LightningModule):
         Returns:
             output (np.ndarray): shape (N_valid, 1 + 1 + C), i.e., [u, z, features]
         """
-        print(f"T_camera_LiDAR:\n{transform_matrix}")
-        print(f"P_camera:\n{projection_matrix}")
-        H, W = 1216,1936
-        N = lidar_pc_lidar.shape[0]
 
-        vod_frame_data = FrameDataLoader(kitti_locations=self.vod_kitti_locations, frame_number=batch_idx)
+        H, W = 1216,1936
+        vod_frame_data = FrameDataLoader(kitti_locations=self.vod_kitti_locations, frame_number=frame_idx)
         local_transforms = FrameTransformMatrix(vod_frame_data)
         transform_matrix = local_transforms.t_camera_lidar
         projection_matrix = local_transforms.camera_projection_matrix
-        # Ensure the fourth feature of lidar_pc_camera is set to 1
-        intensities = lidar_pc_lidar[:, 3].copy()
-        lidar_pc_lidar[:, 3] = 1
 
         # Step 1: Transform to camera frame
         lidar_pc_camera = transform_matrix.dot(lidar_pc_lidar.T).T  # shape: (N, 4)  # [N, 4 + C]
@@ -258,14 +285,13 @@ class CenterPoint(L.LightningModule):
         in_bounds = (u >= 0) & (u < W) & (v >= 0) & (v < H)
         final_mask = valid_mask & in_bounds
 
-        lidar_pc_camera[:, 3] = intensities
         feats_valid = lidar_pc_camera[final_mask, :feature_dim]  # [N_valid, C]
 
         u_valid = u[final_mask].reshape(-1, 1)  # Extract valid u values
         z_valid = z[final_mask].reshape(-1, 1)  # Extract valid z values
 
         num_W_bins = image_shape[1]  # W
-
+        print(f"Number of width bins: {num_W_bins}")
         num_D_bins = 76  # D
         z_max = 100
         depth_bin_size = z_max / num_D_bins
@@ -274,13 +300,11 @@ class CenterPoint(L.LightningModule):
         z_valid = np.clip(z_valid, 0, z_max)
 
         # Step 4: Bin the valid points width and depth wise
-        binned_features = np.zeros((1, 1, 1, num_W_bins, num_D_bins, feature_dim), dtype=np.float32)
+        binned_features = np.zeros((num_W_bins, num_D_bins, feature_dim), dtype=np.float32)
         binned_features = torch.tensor(binned_features)  # If it's NumPy
-        bin_counts = np.zeros((1, 1, 1, num_W_bins, num_D_bins), dtype=np.int32)
+        bin_counts = np.zeros((num_W_bins, num_D_bins), dtype=np.float32)
 
-        depth_bin_size = z_valid.max() / num_D_bins
-        # Overlay valid points on the image
-        import matplotlib.pyplot as plt
+        depth_bin_size = z_max / num_D_bins
 
         # Extract valid u and v coordinates
         v_valid = v[final_mask].reshape(-1, 1)
@@ -299,31 +323,117 @@ class CenterPoint(L.LightningModule):
 
         nonzero_mask = bin_counts > 0
         binned_features[nonzero_mask] /= bin_counts[nonzero_mask].reshape(-1, 1)
-        
-        output = np.concatenate([u_valid, z_valid, feats_valid], axis=1)  # [N_valid, 1 + 1 + C]
 
-        print(f"binned_features shape: {binned_features.shape}")
-        # Perform positional encoding
-        B, N, _, W, D, C = binned_features.shape
-        lidar_seq = binned_features.view(B * N * W, D, C)
+        return binned_features
+    
+    import torch
 
-        lidar_seq += self.depth_pos_encoding.unsqueeze(0).unsqueeze(0)  # Add depth positional encoding
-        
+    def extract_lidar_uvz_features_torch(self,
+        lidar_pc_lidar: torch.Tensor,           # (N, 4 + C)  float32 / float64
+        frame_idx: int,
+        image_shape: tuple,                     # (H, W)
+        feature_dim: int = 4,
+        z_max: float = 100.0,
+        num_D_bins: int = 76,
+    ):
+        """
+        Pure-PyTorch version of extract_lidar_uvz_features.
 
-        return lidar_seq
+        Returns
+        -------
+        binned_features : torch.Tensor
+            shape = (1, 1, 1, W, D, feature_dim)
+        """
+
+        H, W = image_shape  # e.g. (1216, 1936)
+
+        # ------------------------------------------------------------------
+        # 1.  Gather per-frame transforms — keep these as tensors.
+        # ------------------------------------------------------------------
+        vod_frame_data  = FrameDataLoader(kitti_locations=self.vod_kitti_locations,
+                                        frame_number=frame_idx)
+
+        local_transforms = FrameTransformMatrix(vod_frame_data)
+        T_cam_lidar      = torch.as_tensor(local_transforms.t_camera_lidar,      # (4,4)
+                                        dtype=lidar_pc_lidar.dtype,
+                                        device=lidar_pc_lidar.device)
+        P_cam            = torch.as_tensor(local_transforms.camera_projection_matrix,  # (3,4)
+                                        dtype=lidar_pc_lidar.dtype,
+                                        device=lidar_pc_lidar.device)
+
+        # ------------------------------------------------------------------
+        # 2.  Homogeneous transform LiDAR → camera.
+        # ------------------------------------------------------------------
+        # cat(1) keeps any extra feature channels intact
+        ones = torch.ones((lidar_pc_lidar.shape[0], 1),
+                        dtype=lidar_pc_lidar.dtype,
+                        device=lidar_pc_lidar.device)
+        pts_h = torch.cat([lidar_pc_lidar[:, :3], ones], dim=1)   # (N,4)
+        pts_cam = (T_cam_lidar @ pts_h.T).T                       # (N,4)
+
+        # keep intensity + C extra features from original tensor
+        feats = lidar_pc_lidar[:, :feature_dim]
+
+        # ------------------------------------------------------------------
+        # 3.  Project to image plane.
+        # ------------------------------------------------------------------
+        pixels_h = (P_cam @ pts_cam.T).T                          # (N,3)
+        z = pixels_h[:, 2]                                        # (N,)
+        valid = z > 0
+
+        # u = x/z, v = y/z
+        u = (pixels_h[:, 0] / z).long()
+        v = (pixels_h[:, 1] / z).long()
+
+        in_bounds = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        keep = valid & in_bounds
+
+        u_valid = u[keep]
+        z_valid = torch.clamp(z[keep], 0, z_max)
+        feats_valid = feats[keep]
+
+        # ------------------------------------------------------------------
+        # 4.  Pre-allocate bins  (B, C, Z, W, D) = (1,1,1,W,D)
+        # ------------------------------------------------------------------
+        num_W_bins = W
+        print(f"Number of width bins: {num_W_bins}")
+        depth_bin = z_max / num_D_bins
+
+        binned_features = torch.zeros((num_W_bins, num_D_bins, feature_dim),
+                                    dtype=lidar_pc_lidar.dtype,
+                                    device=lidar_pc_lidar.device)
+        bin_counts = torch.zeros((num_W_bins, num_D_bins),
+                                dtype=lidar_pc_lidar.dtype,
+                                device=lidar_pc_lidar.device)
+
+        # ------------------------------------------------------------------
+        # 5.  Scatter-add each point into its (u_bin, d_bin).
+        # ------------------------------------------------------------------
+        for idx in range(u_valid.numel()):
+            u_bin = u_valid[idx]
+            d_bin = int(z_valid[idx] / depth_bin)
+
+            if bin_counts[u_bin, d_bin] < 10:           # cap per-bin points
+                binned_features[u_bin, d_bin] += feats_valid[idx]
+                bin_counts     [u_bin, d_bin] += 1
+
+        # ------------------------------------------------------------------
+        # 6.  Average non-empty bins.
+        # ------------------------------------------------------------------
+        nonzero = bin_counts > 0
+        binned_features[nonzero] /= bin_counts[nonzero].unsqueeze(-1)
+
+        return binned_features
+
     
     def img_features(self, img_data):
-        img_data = torch.tensor(img_data, dtype=torch.float32).permute(2, 0, 1)  # [C, H, W]
-        img_data = img_data.unsqueeze(0).unsqueeze(0)  # [1, 1, C, H, W] for batch size 1 and num cams 1
-        print(f"Image data shape: {img_data.shape}")
         img_feats = self.image_backbone(img_data)  # [B, N, H, W, C]
-        print(f"Image features shape: {img_feats.shape}")
+        B, C_out, H_feat, W_feat = img_feats.shape
         # Reshape to [B, N, H, W, C] where B=1, N=1 (single camera), H=H, W=W, C=C
 
-        B, N, H, W, C = img_feats.shape
-        height_queries = img_feats.view(B * N * W, H, C)
+        height_queries = img_feats.view(B * W_feat, H_feat, C_out)
         print(f"Height queries shape: {height_queries.shape}")
-        return height_queries, H, W
+        return height_queries, H_feat, W_feat
 
     
 
