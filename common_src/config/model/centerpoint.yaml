@@ -27,7 +27,7 @@ middle_encoder:
 #added
 hat:
   dim: 64
-  num_heads: 8
+  num_heads: 2
 
 se_fusion:
   in_channels: 448

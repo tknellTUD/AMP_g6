@@ -239,12 +239,16 @@ class CenterPoint(L.LightningModule):
             log_vars[loss_name] = loss_value.item()
             self.log(f'validation/{loss_name}', loss_value, batch_size=1, sync_dist=True)
         # task0.loss_heatmap', 'task0.loss_bbox', 'task1.loss_heatmap', 'task1.loss_bbox', 'task2.loss_heatmap', 'task2.loss_bbox', 'loss'
+        # Less memory intense version:
         self.val_results_list.append(dict(
             sample_idx = batch['metas'][0]['num_frame'],
-            input_batch = batch,
+            input_batch = {
+            'metas': batch['metas'],
+            },
             bbox_results = bbox_results,
             losses = log_vars
-        ))
+            ))
+        torch.cuda.empty_cache()
 
     
     def extract_lidar_uvz_features(self, lidar_pc_lidar, frame_idx, image_shape, feature_dim=4):
