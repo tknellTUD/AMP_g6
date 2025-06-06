@@ -1,4 +1,6 @@
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import tempfile
 import pickle
 from datetime import datetime
@@ -59,7 +61,7 @@ class CenterPoint(L.LightningModule):
         self.lidar_channel_expansion = torch.nn.Linear(4, 64)  # Expand LiDAR features to 64 channels
         self.zero_init_layer_norm = ZeroInitLayerNorm(64)  # Initialize LayerNorm with zero weights
 
-        self.depth_pos_encoding = torch.nn.Parameter(torch.randn(76, 4))  # Example depth encoding, adjust as needed
+        self.depth_pos_encoding = torch.nn.Parameter(torch.randn(320, 4))  # Example depth encoding, adjust as needed
         self.neck = SECONDFPN(**neck_config)
         self.head = CenterHead(**head_config)
         
@@ -135,7 +137,7 @@ class CenterPoint(L.LightningModule):
                 image_shape=(H_feat, W_feat),
                 feature_dim=4,
                 z_max=100.0,
-                num_D_bins=76))
+                num_D_bins=320))
             print(f"Extracted LiDAR features shape: {lidar_features[-1].shape}")  # [1, 1, 1, W, D, C]
         # lidar_features = self.extract_lidar_uvz_features_torch(lidar_pc_lidar, frame_idx, (H_feat, W_feat), feature_dim=4)
 
@@ -156,17 +158,17 @@ class CenterPoint(L.LightningModule):
         delta = self.zero_init_layer_norm(fused_bev)  # Apply zero-initialized LayerNorm
         fused_bev = image_queries + delta  # Add residual connection
         BW, H, C = fused_bev.shape
-        W = 121
+        W = 320
         B = BW // W
         fused_bev = fused_bev.view(B, C, H, W)  # Reshape to [B, C, H, W]
         print(f"Fused BEV shape: {fused_bev.shape}")  # [B, C, H, W]
         backbone_feats = self.backbone(fused_bev)
+        print(f"Backbone features shape: {backbone_feats[0].shape}")  # [B, C_out, H_feat, W_feat]
         neck_feats = self.neck(backbone_feats)
         ret_dict = self.head(neck_feats)
         return ret_dict
     
     def training_step(self, batch, batch_idx):
-        print(f"Training step {batch_idx} with batch size {len(batch['pts'])}")
         lidar_pts = batch['lidar_data']
         img_data = batch['stereo_camera']
         num_frame = batch['metas'][0]['num_frame']
@@ -204,6 +206,7 @@ class CenterPoint(L.LightningModule):
         lidar_pts = batch['lidar_data']
         img_data = batch['stereo_camera']
         num_frame = batch['metas'][0]['num_frame']
+        metas = batch['metas']
         gt_label_3d = batch['gt_labels_3d']
         gt_bboxes_3d = batch['gt_bboxes_3d']
         print(f"Validation step batch input img_data shape; {img_data[0].shape}")
@@ -334,7 +337,7 @@ class CenterPoint(L.LightningModule):
         image_shape: tuple,                     # (H, W)
         feature_dim: int = 4,
         z_max: float = 100.0,
-        num_D_bins: int = 76,
+        num_D_bins: int = 320,
     ):
         """
         Pure-PyTorch version of extract_lidar_uvz_features.
@@ -431,7 +434,7 @@ class CenterPoint(L.LightningModule):
         B, C_out, H_feat, W_feat = img_feats.shape
         # Reshape to [B, N, H, W, C] where B=1, N=1 (single camera), H=H, W=W, C=C
 
-        height_queries = img_feats.view(B * W_feat, H_feat, C_out)
+        height_queries = img_feats.contiguous().view(B * W_feat, H_feat, C_out)
         print(f"Height queries shape: {height_queries.shape}")
         return height_queries, H_feat, W_feat
 
