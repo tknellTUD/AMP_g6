@@ -80,7 +80,7 @@ class ViewOfDelft(Dataset):
     def __len__(self):
         return len(self.sample_list)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, segmentation_generation=False):
         num_frame = self.sample_list[idx]
         vod_frame_data = FrameDataLoader(kitti_locations=self.vod_kitti_locations,
                                          frame_number=num_frame)
@@ -89,7 +89,12 @@ class ViewOfDelft(Dataset):
         lidar_data = vod_frame_data.lidar_data
         image_data = vod_frame_data.image
         # Get segmentations scores
-        sem_scores = self.get_segmentation(image_data)
+        if self.split == "train" or segmentation_generation:
+            seg_path = os.path.join("common_src/dataset/sem_cache", f"{num_frame}.npz")
+            sem_ids = np.load(seg_path)["sem_ids"]  # shape: (H, W)
+            sem_scores = np.eye(4, dtype=np.float32)[sem_ids]  # shape: (H, W, 4)
+        else:
+            sem_scores = self.get_segmentation(image_data)
         # Painting the pointcloud
         transforms = FrameTransformMatrix(vod_frame_data)
         t_camera_lidar = transforms.t_camera_lidar
@@ -166,7 +171,7 @@ class ViewOfDelft(Dataset):
     
     def paint_lidar_points(self, lidar_points, sem_scores, transform_matrix, P):
         """
-        lidar_points: (N, 4)
+        lidar_points: (N, 4) - [x, y, z, intensity]
         sem_scores: (H, W, C)
         transform_matrix: (4, 4)
         P: (3, 4)
@@ -175,10 +180,13 @@ class ViewOfDelft(Dataset):
 
         # Step 1: Transform to camera frame
         lidar_points = lidar_points.copy()
-        lidar_points[:,3] = 1.0
-        points_cam = (transform_matrix @ lidar_points.T).T  # shape: (N, 4)
+        coords = lidar_points[:, :3]
+        intensity = lidar_points[:, 3:4]  # (N, 1)
+        
+        lidar_hom = np.concatenate([coords, np.ones((coords.shape[0], 1))], axis=1)  # (N, 4)
+        points_cam = (transform_matrix @ lidar_hom.T).T  # (N, 4)
 
-        # Step 2: Project to image using camera matrix
+        # Step 2: Project to image
         pixels = (P @ points_cam.T).T  # (N, 3)
         z = pixels[:, 2]
         valid_mask = z > 0
@@ -186,27 +194,25 @@ class ViewOfDelft(Dataset):
         u = (pixels[:, 0] / z).astype(int)
         v = (pixels[:, 1] / z).astype(int)
 
-        # Rescale u and w to fit to different size segmentation
+        # Step 3: Rescale u,v to segmentation map size
         orig_H = 1216
         orig_W = 1936
-        H, W, _ = sem_scores.shape  # resized seg map shape (e.g., 512, 1024)
-
-        # Rescale u and v from original image scale to segmentation map scale
-        u_scaled= (u * W / orig_W).astype(int)
+        u_scaled = (u * W / orig_W).astype(int)
         v_scaled = (v * H / orig_H).astype(int)
 
-        # Step 3: Check image bounds
+        # Step 4: Filter valid points
         in_bounds = (u_scaled >= 0) & (u_scaled < W) & (v_scaled >= 0) & (v_scaled < H)
         final_mask = valid_mask & in_bounds
 
-        # Step 4: Retrieve segmentation scores
+        # Step 5: Retrieve segmentation scores
         seg = np.zeros((lidar_points.shape[0], C), dtype=np.float32)
-        seg[final_mask] = sem_scores[v_scaled[final_mask], u_scaled[final_mask], :]  # fast lookup
+        seg[final_mask] = sem_scores[v_scaled[final_mask], u_scaled[final_mask], :]
 
-        # Step 5: Concatenate painted features
-        painted = np.hstack([lidar_points, seg])  # (N, 4 + C)
+        # Step 6: Concatenate original features + segmentation
+        painted = np.hstack([coords, intensity, seg])  # (N, 4 + C)
 
         return painted
+
     
 def save_image(image_np, id = 0, output_dir="outputs"):
     plt.imsave(os.path.join(output_dir, f"image_{id}.png"), image_np)
@@ -322,19 +328,51 @@ def visualize_painted_pointcloud(painted_lidar, class_names=["bg", "person", "ca
     plt.savefig("painted_pointcloud.png")
     plt.close()
 
+def save_sem_scores(dataset, output_dir="common_src/dataset/sem_cache"):
+    os.makedirs(output_dir, exist_ok=True)
+
+    for idx in range(len(dataset)):
+        frame_data = dataset[idx, True] 
+        sem_scores = frame_data["sem_scores"].astype(np.float16)
+        frame_id = frame_data["meta"]["num_frame"]
+
+        save_path = os.path.join(output_dir, f"{frame_id}.npz")
+        np.savez_compressed(save_path, sem_scores=sem_scores)
+
+        if idx % 50 == 0:
+            print(f"Saved {idx+1}/{len(dataset)} segmentations")
+
+def save_argmax_segmentation(dataset, output_dir="common_src/dataset/sem_cache"):
+     # shape (H, W)
+    os.makedirs(output_dir, exist_ok=True)
+    for idx in range(len(dataset)):
+        frame_data = dataset[idx] 
+        sem_scores = frame_data["sem_scores"].astype(np.float16)
+        frame_id = frame_data["meta"]["num_frame"]
+        seg_map = np.argmax(sem_scores, axis=-1).astype(np.uint8) 
+        np.savez_compressed(os.path.join(output_dir, f"{frame_id}.npz"), sem_ids=seg_map)
+        if idx % 50 == 0:
+            print(f"Saved {idx+1}/{len(dataset)} segmentations")
+
 if __name__ == "__main__":
     # Test if Segmentation works
     dataset = ViewOfDelft()
     id = 658
-    start = time.time()
-    data_658 = dataset[id]
-    end = time.time()
-    print(f"Time to load sample {id}: {end - start:.2f} seconds")
-    image = data_658["image"]
-    sem_scores = data_658["sem_scores"]
-    painted_pc = data_658["lidar_data"]
+
+    save_argmax_segmentation(dataset)
+
+    ### Timing Segmentation
+    # start = time.time()
+    # data_658 = dataset[id]
+    # end = time.time()
+    # print(f"Time to load sample {id}: {end - start:.2f} seconds")
+
+    ### Saving visualizations
+    # image = data_658["image"]
+    # sem_scores = data_658["sem_scores"]
+    # painted_pc = data_658["lidar_data"]
     # 
     # save_painted_projection(painted_pc, id, "xy")
     # The images get saved under outputs/
-    save_segmentation_map(sem_scores, id)
+    # save_segmentation_map(sem_scores, id)
     # save_image(image, id=id)
