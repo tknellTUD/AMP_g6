@@ -97,7 +97,7 @@ class ViewOfDelft(Dataset):
             raw = np.load(seg_path)
             if "sem_scores" in raw:
                 packed_scores = raw["sem_scores"]  # shape: (H, W), dtype=uint16
-                sem_scores = decode_sem_scores(packed_scores)  # shape: (H, W, 4)
+                sem_scores = decode_sem_scores_compressed(packed_scores)  # shape: (H, W, 4)
             elif "sem_ids" in raw:
                 sem_ids = raw["sem_ids"]  # shape: (H, W)
                 sem_scores = np.eye(4, dtype=np.float32)[sem_ids]  # one-hot
@@ -158,7 +158,6 @@ class ViewOfDelft(Dataset):
             image = image_data
         )
 
-    
     def get_segmentation(self, image_array):
         image = Image.fromarray(image_array)
         # Getting the segmentation
@@ -389,23 +388,55 @@ def decode_sem_scores(packed_scores):
     decoded = np.stack([q0, q1, q2, q3], axis=-1).astype(np.float32) / 10.0  # shape (H, W, 4)
     return decoded
 
+def save_sem_scores_compressed(dataset, output_dir="common_src/dataset/sem_cache"):
+    os.makedirs(output_dir, exist_ok=True)
+
+    for idx in range(len(dataset)):
+        frame_data = dataset[idx]
+        sem_scores = frame_data["sem_scores"]  # shape: (H, W, 4)
+        frame_id = frame_data["meta"]["num_frame"]
+
+        # Extract only class channels (car, pedestrian, cyclist), skip background
+        # Assume: sem_scores[..., 1] = car, [2] = pedestrian, [3] = cyclist
+        selected = sem_scores[..., 1:]  # shape: (H, W, 3)
+
+        # Quantize to 0–255
+        quantized = np.clip(np.round(selected * 255), 0, 255).astype(np.uint8)  # (H, W, 3)
+
+        # Save
+        save_path = os.path.join(output_dir, f"{frame_id}.npz")
+        np.savez_compressed(save_path, sem_scores=quantized)
+
+        if idx % 50 == 0:
+            print(f"Saved {idx+1}/{len(dataset)} compressed segmentations")
+
+def decode_sem_scores_compressed(quantized):
+    # quantized: shape (H, W, 3), dtype=uint8
+
+    probs = quantized.astype(np.float32) / 255.0  # (H, W, 3)
+    sum_ = probs.sum(axis=-1, keepdims=True)  # (H, W, 1)
+    bg = np.clip(1.0 - sum_, 0.0, 1.0)  # background = 1 - sum of rest
+
+    full = np.concatenate([bg, probs], axis=-1)  # (H, W, 4)
+    return full
+
 if __name__ == "__main__":
     # Test if Segmentation works
-    dataset = ViewOfDelft(segmentation_generation=True)
+    dataset = ViewOfDelft(segmentation_generation=False)
     id = 658
 
-    save_sem_scores(dataset)
+    #save_sem_scores_compressed(dataset)
 
     ### Timing Segmentation
     # start = time.time()
-    # data_658 = dataset[id]
+    data_658 = dataset[id]
     # end = time.time()
     # print(f"Time to load sample {id}: {end - start:.2f} seconds")
 
     ### Saving visualizations
     # image = data_658["image"]
-    # sem_scores = data_658["sem_scores"]
-    # painted_pc = data_658["lidar_data"]
+    sem_scores = data_658["sem_scores"]
+    painted_pc = data_658["lidar_data"]
     # 
     # save_painted_projection(painted_pc, id, "xy")
     # The images get saved under outputs/
