@@ -1,7 +1,9 @@
 import warnings
 
 from torch import nn as nn
-from torch.nn import BatchNorm2d, Conv2d
+from torch.nn import BatchNorm2d, Conv2d, Dropout2d
+from common_src.model.bricks.cbam import CBAM
+
 
 class SECOND(nn.Module):
     """Backbone network for SECOND/PointPillars/PartA2/MVXNet.
@@ -36,6 +38,7 @@ class SECOND(nn.Module):
                        bias=False),
                 BatchNorm2d(out_channels[i], eps=1e-3, momentum=0.01),
                 nn.ReLU(inplace=True),
+                Dropout2d(p=0.1),
             ]
             for j in range(layer_num):
                 block.append(
@@ -48,7 +51,10 @@ class SECOND(nn.Module):
                 block.append(nn.ReLU(inplace=True))
 
             block = nn.Sequential(*block)
+            attention = CBAM(out_channels[i])
+            block = nn.Sequential(block, attention)
             blocks.append(block)
+
 
         self.blocks = nn.ModuleList(blocks)
 

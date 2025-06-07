@@ -45,8 +45,8 @@ class CenterPoint(L.LightningModule):
         self.voxel_layer = Voxelization(**voxel_layer_config)
         self.voxel_encoder = PillarFeatureNet(**voxel_encoder_config)
         self.middle_encoder = PointPillarsScatter(**middle_encoder_config)
-        #self.backbone = SECOND(**backbone_config)
-        self.backbone = resnet_0.ResNetBackbone(**backbone_config)
+        self.backbone = SECOND(**backbone_config)
+        #self.backbone = resnet_0.ResNetBackbone(**backbone_config)
         self.neck = SECONDFPN(**neck_config)
         self.head = CenterHead(**head_config)
         
@@ -93,9 +93,9 @@ class CenterPoint(L.LightningModule):
         bs = coors[-1,0].item() + 1
         bev_feats = self.middle_encoder(voxel_features, coors, bs)      
         backbone_feats = self.backbone(bev_feats)
-        print(f'Backbone features shape: {backbone_feats[0].shape}, {backbone_feats[1].shape}, {backbone_feats[2].shape}')
+        #print(f'Backbone features shape: {backbone_feats[0].shape}, {backbone_feats[1].shape}, {backbone_feats[2].shape}')
         neck_feats = self.neck(backbone_feats)
-        print(f'Neck features shape: {neck_feats[0].shape}, {neck_feats[1].shape}, {neck_feats[2].shape}')
+        #print(f'Neck features shape: {neck_feats[0].shape}, {neck_feats[1].shape}, {neck_feats[2].shape}')
         ret_dict = self.head(neck_feats)
         return ret_dict
     
