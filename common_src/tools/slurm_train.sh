@@ -22,6 +22,6 @@ conda activate amp
 previous=$(nvidia-smi --query-accounted-apps='gpu_utilization,mem_utilization,max_memory_usage,time' --format='csv' | /usr/bin/tail -n '+2')
 nvidia-smi
 
-srun python -u common_src/tools/train.py exp_id=centerpoint_pp_mobilenet_db_try_slurm batch_size=4 num_workers=2 epochs=6
+srun python -u common_src/tools/train.py exp_id=cp_pp_mn_precomp batch_size=4 num_workers=2 epochs=10
 
 nvidia-smi --query-accounted-apps='gpu_utilization,mem_utilization,max_memory_usage,time' --format='csv' | /usr/bin/grep -v -F "$previous"

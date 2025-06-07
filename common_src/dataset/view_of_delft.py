@@ -54,12 +54,14 @@ class ViewOfDelft(Dataset):
     def __init__(self, 
                  data_root = 'data/view_of_delft', 
                  sequential_loading=False,
-                 split = 'train'):
+                 split = 'train',
+                 segmentation_generation=False):
         super().__init__()
         
         self.data_root = data_root
         assert split in ['train', 'val', 'test'], f"Invalid split: {split}. Must be one of ['train', 'val', 'test']"
         self.split = split
+        self.segmentation_generation = segmentation_generation
         split_file = os.path.join(data_root, 'lidar', 'ImageSets', f'{split}.txt')
 
         with open(split_file, 'r') as f:
@@ -80,76 +82,82 @@ class ViewOfDelft(Dataset):
     def __len__(self):
         return len(self.sample_list)
 
-    def __getitem__(self, idx, segmentation_generation=False):
+    def __getitem__(self, idx):
         num_frame = self.sample_list[idx]
         vod_frame_data = FrameDataLoader(kitti_locations=self.vod_kitti_locations,
-                                         frame_number=num_frame)
+                                        frame_number=num_frame)
         local_transforms = FrameTransformMatrix(vod_frame_data)
-        
+
         lidar_data = vod_frame_data.lidar_data
         image_data = vod_frame_data.image
-        # Get segmentations scores
-        if self.split == "train" or segmentation_generation:
+
+        # Get segmentation scores
+        if self.split == "train" and not self.segmentation_generation:
             seg_path = os.path.join("common_src/dataset/sem_cache", f"{num_frame}.npz")
-            sem_ids = np.load(seg_path)["sem_ids"]  # shape: (H, W)
-            sem_scores = np.eye(4, dtype=np.float32)[sem_ids]  # shape: (H, W, 4)
+            raw = np.load(seg_path)
+            if "sem_scores" in raw:
+                packed_scores = raw["sem_scores"]  # shape: (H, W), dtype=uint16
+                sem_scores = decode_sem_scores(packed_scores)  # shape: (H, W, 4)
+            elif "sem_ids" in raw:
+                sem_ids = raw["sem_ids"]  # shape: (H, W)
+                sem_scores = np.eye(4, dtype=np.float32)[sem_ids]  # one-hot
+            else:
+                raise ValueError("Neither 'sem_scores' nor 'sem_ids' found in npz")
         else:
             sem_scores = self.get_segmentation(image_data)
+
         # Painting the pointcloud
         transforms = FrameTransformMatrix(vod_frame_data)
         t_camera_lidar = transforms.t_camera_lidar
         P = transforms.camera_projection_matrix
         painted_lidar = self.paint_lidar_points(lidar_data, sem_scores, t_camera_lidar, P)
 
-        
         gt_labels_3d_list = []
         gt_bboxes_3d_list = []
         if self.split != 'test':
             raw_labels = vod_frame_data.raw_labels
             for idx, label in enumerate(raw_labels):
                 label = label.split(' ')
-                
-                if label[self.LABEL_MAPPING['class']] in self.CLASSES: 
 
+                if label[self.LABEL_MAPPING['class']] in self.CLASSES:
                     gt_labels_3d_list.append(int(self.CLASSES.index(label[self.LABEL_MAPPING['class']])))
 
                     bbox3d_loc_camera = np.array(label[self.LABEL_MAPPING['bbox3d_location']])
                     trans_homo_cam = np.ones((1,4))
                     trans_homo_cam[:, :3] = bbox3d_loc_camera
                     bbox3d_loc_lidar = homogeneous_transformation(trans_homo_cam, local_transforms.t_lidar_camera)
-                    
-                    bbox3d_locs = np.array(bbox3d_loc_lidar[0,:3], dtype=np.float32)         
-                    bbox3d_dims = np.array(label[self.LABEL_MAPPING['bbox3d_dimensions']], dtype=np.float32)[[2, 1, 0]] # hwl -> lwh
+
+                    bbox3d_locs = np.array(bbox3d_loc_lidar[0,:3], dtype=np.float32)
+                    bbox3d_dims = np.array(label[self.LABEL_MAPPING['bbox3d_dimensions']], dtype=np.float32)[[2, 1, 0]]
                     bbox3d_rot = np.array([label[self.LABEL_MAPPING['bbox3d_rotation']]], dtype=np.float32)
-                
+
                     gt_bboxes_3d_list.append(np.concatenate([bbox3d_locs, bbox3d_dims, bbox3d_rot], axis=0))
 
         painted_lidar = torch.tensor(painted_lidar)
-        
+
         if gt_bboxes_3d_list == []:
             gt_labels_3d = np.array([0])
             gt_bboxes_3d = np.zeros((1,7))
         else:
             gt_labels_3d = np.array(gt_labels_3d_list, dtype=np.int64)
             gt_bboxes_3d = np.stack(gt_bboxes_3d_list, axis=0)
-        
+
         gt_bboxes_3d = LiDARInstance3DBoxes(
             gt_bboxes_3d,
             box_dim=gt_bboxes_3d.shape[-1],
             origin=(0.5, 0.5, 0))
-        
+
         gt_labels_3d = torch.tensor(gt_labels_3d)
-        
+
         return dict(
             lidar_data = painted_lidar,
             gt_labels_3d = gt_labels_3d,
             gt_bboxes_3d = gt_bboxes_3d,
-            meta = dict(
-                num_frame = num_frame 
-            ),
+            meta = dict(num_frame = num_frame),
             sem_scores = sem_scores,
             image = image_data
         )
+
     
     def get_segmentation(self, image_array):
         image = Image.fromarray(image_array)
@@ -332,15 +340,25 @@ def save_sem_scores(dataset, output_dir="common_src/dataset/sem_cache"):
     os.makedirs(output_dir, exist_ok=True)
 
     for idx in range(len(dataset)):
-        frame_data = dataset[idx, True] 
-        sem_scores = frame_data["sem_scores"].astype(np.float16)
+        frame_data = dataset[idx] 
+        sem_scores = frame_data["sem_scores"]  # shape (H, W, 4), float32
         frame_id = frame_data["meta"]["num_frame"]
 
+        # Quantize and encode the entire softmax map into (H, W) uint16
+        quantized = np.round(sem_scores * 10).astype(np.uint16)  # shape (H, W, 4)
+        compressed_score = (
+            (quantized[:, :, 0] << 12) |
+            (quantized[:, :, 1] << 8) |
+            (quantized[:, :, 2] << 4) |
+            (quantized[:, :, 3])
+        ).astype(np.uint16)  # shape (H, W)
+
         save_path = os.path.join(output_dir, f"{frame_id}.npz")
-        np.savez_compressed(save_path, sem_scores=sem_scores)
+        np.savez_compressed(save_path, sem_scores=compressed_score)
 
         if idx % 50 == 0:
             print(f"Saved {idx+1}/{len(dataset)} segmentations")
+
 
 def save_argmax_segmentation(dataset, output_dir="common_src/dataset/sem_cache"):
      # shape (H, W)
@@ -349,17 +367,34 @@ def save_argmax_segmentation(dataset, output_dir="common_src/dataset/sem_cache")
         frame_data = dataset[idx] 
         sem_scores = frame_data["sem_scores"].astype(np.float16)
         frame_id = frame_data["meta"]["num_frame"]
-        seg_map = np.argmax(sem_scores, axis=-1).astype(np.uint8) 
+        seg_map = np.argmax(sem_scores, axis=-1).astype(np.uint16) 
         np.savez_compressed(os.path.join(output_dir, f"{frame_id}.npz"), sem_ids=seg_map)
         if idx % 50 == 0:
             print(f"Saved {idx+1}/{len(dataset)} segmentations")
 
+def encode_softmax_to_uint16(softmax_vector):
+    # Assume input is 4 values between 0 and 1
+    quantized = (np.round(softmax_vector * 10)).astype(np.uint16)  # values 0–10
+    # Pack into 16-bit int: 4 x 4-bit chunks
+    packed = (quantized[0] << 12) | (quantized[1] << 8) | (quantized[2] << 4) | quantized[3]
+    return packed
+
+def decode_sem_scores(packed_scores):
+    # packed_scores: shape (H, W), dtype=uint16
+    q0 = (packed_scores >> 12) & 0xF
+    q1 = (packed_scores >> 8) & 0xF
+    q2 = (packed_scores >> 4) & 0xF
+    q3 = packed_scores & 0xF
+
+    decoded = np.stack([q0, q1, q2, q3], axis=-1).astype(np.float32) / 10.0  # shape (H, W, 4)
+    return decoded
+
 if __name__ == "__main__":
     # Test if Segmentation works
-    dataset = ViewOfDelft()
+    dataset = ViewOfDelft(segmentation_generation=True)
     id = 658
 
-    save_argmax_segmentation(dataset)
+    save_sem_scores(dataset)
 
     ### Timing Segmentation
     # start = time.time()
