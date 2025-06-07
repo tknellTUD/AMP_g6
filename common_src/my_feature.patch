@@ -1,0 +1,268 @@
+diff --git a/common_src/__pycache__/__init__.cpython-39.pyc b/common_src/__pycache__/__init__.cpython-39.pyc
+index 1da01fb..ae264f6 100644
+Binary files a/common_src/__pycache__/__init__.cpython-39.pyc and b/common_src/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/config/model/centerpoint.yaml b/common_src/config/model/centerpoint.yaml
+index edcb997..19d8a00 100644
+--- a/common_src/config/model/centerpoint.yaml
++++ b/common_src/config/model/centerpoint.yaml
+@@ -26,9 +26,11 @@ middle_encoder:
+ 
+ backbone: 
+   in_channels: 64
+-  layer_nums: [3, 5, 5]
+-  layer_strides: [2, 2, 2]
+-  out_channels: [64, 128, 256]
++  weights_path: '/home/rwsteen/.cache/torch/hub/checkpoints/resnet50-19c8e357.pth'
++  # in_channels: 64
++  # layer_nums: [3, 5, 5]
++  # layer_strides: [2, 2, 2]
++  # out_channels: [64, 128, 256]
+ 
+ neck:
+   in_channels: [64, 128, 256]
+diff --git a/common_src/dataset/__pycache__/__init__.cpython-39.pyc b/common_src/dataset/__pycache__/__init__.cpython-39.pyc
+index 79b6d5b..aa8911a 100644
+Binary files a/common_src/dataset/__pycache__/__init__.cpython-39.pyc and b/common_src/dataset/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/dataset/__pycache__/utils.cpython-39.pyc b/common_src/dataset/__pycache__/utils.cpython-39.pyc
+index ca514e2..09f8401 100644
+Binary files a/common_src/dataset/__pycache__/utils.cpython-39.pyc and b/common_src/dataset/__pycache__/utils.cpython-39.pyc differ
+diff --git a/common_src/dataset/__pycache__/view_of_delft.cpython-39.pyc b/common_src/dataset/__pycache__/view_of_delft.cpython-39.pyc
+index 078aad2..8d8c025 100644
+Binary files a/common_src/dataset/__pycache__/view_of_delft.cpython-39.pyc and b/common_src/dataset/__pycache__/view_of_delft.cpython-39.pyc differ
+diff --git a/common_src/evaluation/__pycache__/__init__.cpython-39.pyc b/common_src/evaluation/__pycache__/__init__.cpython-39.pyc
+index ba5afbd..eb8dfd1 100644
+Binary files a/common_src/evaluation/__pycache__/__init__.cpython-39.pyc and b/common_src/evaluation/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/__pycache__/__init__.cpython-39.pyc b/common_src/model/__pycache__/__init__.cpython-39.pyc
+index 769fdb1..5e7f152 100644
+Binary files a/common_src/model/__pycache__/__init__.cpython-39.pyc and b/common_src/model/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/backbones/__pycache__/__init__.cpython-39.pyc b/common_src/model/backbones/__pycache__/__init__.cpython-39.pyc
+index 55781bf..1db099b 100644
+Binary files a/common_src/model/backbones/__pycache__/__init__.cpython-39.pyc and b/common_src/model/backbones/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/backbones/__pycache__/resnet_0.cpython-39.pyc b/common_src/model/backbones/__pycache__/resnet_0.cpython-39.pyc
+new file mode 100644
+index 0000000..62e2399
+Binary files /dev/null and b/common_src/model/backbones/__pycache__/resnet_0.cpython-39.pyc differ
+diff --git a/common_src/model/backbones/__pycache__/second.cpython-39.pyc b/common_src/model/backbones/__pycache__/second.cpython-39.pyc
+index 8cf8d80..181dfef 100644
+Binary files a/common_src/model/backbones/__pycache__/second.cpython-39.pyc and b/common_src/model/backbones/__pycache__/second.cpython-39.pyc differ
+diff --git a/common_src/model/backbones/resnet_0.py b/common_src/model/backbones/resnet_0.py
+new file mode 100644
+index 0000000..f460fbe
+--- /dev/null
++++ b/common_src/model/backbones/resnet_0.py
+@@ -0,0 +1,74 @@
++import os
++from torch import nn
++from torchvision.models import resnet50
++import torch
++
++class ResNetBackbone(nn.Module):
++    """ResNet backbone adapted for LiDAR data and custom output channels."""
++    def __init__(self, in_channels=64, weights_path=None):
++        super().__init__()
++        # Load base ResNet without weights (so we can custom-load them)
++        self.resnet = resnet50(weights=None)
++
++        # Replace first conv layer to match LiDAR feature input
++        self.resnet.conv1 = nn.Conv2d(
++            in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
++        )
++
++        # Define three blocks
++        self.block1 = nn.Sequential(
++            self.resnet.conv1,
++            self.resnet.bn1,
++            self.resnet.relu,
++            self.resnet.maxpool,
++            self.resnet.layer1  # Output: 256 channels
++        )
++        self.block2 = self.resnet.layer2  # Output: 512 channels
++        self.block3 = self.resnet.layer3  # Output: 1024 channels
++
++        # Project to desired output channels: [64, 128, 256]
++        self.out_proj1 = nn.Conv2d(256, 64, kernel_size=1)
++        self.out_proj2 = nn.Conv2d(512, 128, kernel_size=1)
++        self.out_proj3 = nn.Conv2d(1024, 256, kernel_size=1)
++
++        # Load pretrained weights (with strict=False to ignore shape mismatches)
++        if weights_path is not None:
++            if os.path.exists(weights_path):
++                state_dict = torch.load(weights_path, weights_only=False)
++                self.load_state_dict(state_dict, strict=False)
++                print(f"Loaded weights from {weights_path}")
++            else:
++                raise FileNotFoundError(f"weights_path does not exist: {weights_path}")
++        else:
++            print("No custom weights provided, using default ResNet initialization.")
++
++    def forward(self, x):
++        """Forward pass through the backbone."""
++        outs = []
++
++        x = self.block1(x)       # [B, 256, H/4, W/4]
++        x1 = self.out_proj1(x)   # -> [B, 64, H/4, W/4]
++        outs.append(x1)
++
++        x = self.block2(x)       # [B, 512, H/8, W/8]
++        x2 = self.out_proj2(x)   # -> [B, 128, H/8, W/8]
++        outs.append(x2)
++
++        x = self.block3(x)       # [B, 1024, H/16, W/16]
++        x3 = self.out_proj3(x)   # -> [B, 256, H/16, W/16]
++        outs.append(x3)
++
++        return outs  # List of 3 outputs with target channels
++
++# Example test
++if __name__ == "__main__":
++    backbone_config = {
++        'in_channels': 64,
++        'weights_path': '/home/rwsteen/.cache/torch/hub/checkpoints/resnet50-19c8e357.pth'
++    }
++    model = ResNetBackbone(**backbone_config)
++    dummy_input = torch.randn(4, 64, 320, 320)
++    output = model(dummy_input)
++
++    for i, o in enumerate(output):
++        print(f"Output {i+1} shape: {o.shape}")
+diff --git a/common_src/model/bricks/__pycache__/__init__.cpython-39.pyc b/common_src/model/bricks/__pycache__/__init__.cpython-39.pyc
+index 35f0087..5e1ea47 100644
+Binary files a/common_src/model/bricks/__pycache__/__init__.cpython-39.pyc and b/common_src/model/bricks/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/bricks/__pycache__/conv_module.cpython-39.pyc b/common_src/model/bricks/__pycache__/conv_module.cpython-39.pyc
+index 49df9d6..88aff4d 100644
+Binary files a/common_src/model/bricks/__pycache__/conv_module.cpython-39.pyc and b/common_src/model/bricks/__pycache__/conv_module.cpython-39.pyc differ
+diff --git a/common_src/model/detector/__pycache__/__init__.cpython-39.pyc b/common_src/model/detector/__pycache__/__init__.cpython-39.pyc
+index 26ebcff..8d1b3ce 100644
+Binary files a/common_src/model/detector/__pycache__/__init__.cpython-39.pyc and b/common_src/model/detector/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/detector/__pycache__/centerpoint.cpython-39.pyc b/common_src/model/detector/__pycache__/centerpoint.cpython-39.pyc
+index 617455b..05d89cf 100644
+Binary files a/common_src/model/detector/__pycache__/centerpoint.cpython-39.pyc and b/common_src/model/detector/__pycache__/centerpoint.cpython-39.pyc differ
+diff --git a/common_src/model/detector/centerpoint.py b/common_src/model/detector/centerpoint.py
+index fd8d9c0..4f9b18e 100644
+--- a/common_src/model/detector/centerpoint.py
++++ b/common_src/model/detector/centerpoint.py
+@@ -19,6 +19,7 @@ import torch.distributed as dist
+ from common_src.ops import Voxelization
+ from common_src.model.voxel_encoders import PillarFeatureNet
+ from common_src.model.middle_encoders import PointPillarsScatter
++from common_src.model.backbones import resnet_0
+ from common_src.model.backbones import SECOND
+ from common_src.model.necks import SECONDFPN
+ from common_src.model.heads import CenterHead
+@@ -44,7 +45,8 @@ class CenterPoint(L.LightningModule):
+         self.voxel_layer = Voxelization(**voxel_layer_config)
+         self.voxel_encoder = PillarFeatureNet(**voxel_encoder_config)
+         self.middle_encoder = PointPillarsScatter(**middle_encoder_config)
+-        self.backbone = SECOND(**backbone_config)
++        #self.backbone = SECOND(**backbone_config)
++        self.backbone = resnet_0.ResNetBackbone(**backbone_config)
+         self.neck = SECONDFPN(**neck_config)
+         self.head = CenterHead(**head_config)
+         
+@@ -89,7 +91,7 @@ class CenterPoint(L.LightningModule):
+     
+         voxel_features = self.voxel_encoder(voxels, num_points, coors)
+         bs = coors[-1,0].item() + 1
+-        bev_feats = self.middle_encoder(voxel_features, coors, bs)        
++        bev_feats = self.middle_encoder(voxel_features, coors, bs)      
+         backbone_feats = self.backbone(bev_feats)
+         neck_feats = self.neck(backbone_feats)
+         ret_dict = self.head(neck_feats)
+diff --git a/common_src/model/heads/__pycache__/__init__.cpython-39.pyc b/common_src/model/heads/__pycache__/__init__.cpython-39.pyc
+index cb7ec24..12105ea 100644
+Binary files a/common_src/model/heads/__pycache__/__init__.cpython-39.pyc and b/common_src/model/heads/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/heads/__pycache__/centerpoint_head.cpython-39.pyc b/common_src/model/heads/__pycache__/centerpoint_head.cpython-39.pyc
+index 3ccae82..3257d18 100644
+Binary files a/common_src/model/heads/__pycache__/centerpoint_head.cpython-39.pyc and b/common_src/model/heads/__pycache__/centerpoint_head.cpython-39.pyc differ
+diff --git a/common_src/model/losses/__pycache__/__init__.cpython-39.pyc b/common_src/model/losses/__pycache__/__init__.cpython-39.pyc
+index 63f0045..4bf0cb5 100644
+Binary files a/common_src/model/losses/__pycache__/__init__.cpython-39.pyc and b/common_src/model/losses/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/losses/__pycache__/gaussian_focal_loss.cpython-39.pyc b/common_src/model/losses/__pycache__/gaussian_focal_loss.cpython-39.pyc
+index d7a69b6..293e2ac 100644
+Binary files a/common_src/model/losses/__pycache__/gaussian_focal_loss.cpython-39.pyc and b/common_src/model/losses/__pycache__/gaussian_focal_loss.cpython-39.pyc differ
+diff --git a/common_src/model/losses/__pycache__/l1_loss.cpython-39.pyc b/common_src/model/losses/__pycache__/l1_loss.cpython-39.pyc
+index d9aa60c..03e0020 100644
+Binary files a/common_src/model/losses/__pycache__/l1_loss.cpython-39.pyc and b/common_src/model/losses/__pycache__/l1_loss.cpython-39.pyc differ
+diff --git a/common_src/model/losses/__pycache__/losses_utils.cpython-39.pyc b/common_src/model/losses/__pycache__/losses_utils.cpython-39.pyc
+index 29457c6..6d9ab95 100644
+Binary files a/common_src/model/losses/__pycache__/losses_utils.cpython-39.pyc and b/common_src/model/losses/__pycache__/losses_utils.cpython-39.pyc differ
+diff --git a/common_src/model/middle_encoders/__pycache__/__init__.cpython-39.pyc b/common_src/model/middle_encoders/__pycache__/__init__.cpython-39.pyc
+index bb29633..667fc49 100644
+Binary files a/common_src/model/middle_encoders/__pycache__/__init__.cpython-39.pyc and b/common_src/model/middle_encoders/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/middle_encoders/__pycache__/pillar_scatter.cpython-39.pyc b/common_src/model/middle_encoders/__pycache__/pillar_scatter.cpython-39.pyc
+index a6c4682..70256f9 100644
+Binary files a/common_src/model/middle_encoders/__pycache__/pillar_scatter.cpython-39.pyc and b/common_src/model/middle_encoders/__pycache__/pillar_scatter.cpython-39.pyc differ
+diff --git a/common_src/model/necks/__pycache__/__init__.cpython-39.pyc b/common_src/model/necks/__pycache__/__init__.cpython-39.pyc
+index cf7f242..bbcf845 100644
+Binary files a/common_src/model/necks/__pycache__/__init__.cpython-39.pyc and b/common_src/model/necks/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/necks/__pycache__/second_fpn.cpython-39.pyc b/common_src/model/necks/__pycache__/second_fpn.cpython-39.pyc
+index 0216f47..f19cbff 100644
+Binary files a/common_src/model/necks/__pycache__/second_fpn.cpython-39.pyc and b/common_src/model/necks/__pycache__/second_fpn.cpython-39.pyc differ
+diff --git a/common_src/model/utils/__pycache__/__init__.cpython-39.pyc b/common_src/model/utils/__pycache__/__init__.cpython-39.pyc
+index ba9cf03..c4d9dda 100644
+Binary files a/common_src/model/utils/__pycache__/__init__.cpython-39.pyc and b/common_src/model/utils/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/utils/__pycache__/base_box3d.cpython-39.pyc b/common_src/model/utils/__pycache__/base_box3d.cpython-39.pyc
+index 5b501be..193681c 100644
+Binary files a/common_src/model/utils/__pycache__/base_box3d.cpython-39.pyc and b/common_src/model/utils/__pycache__/base_box3d.cpython-39.pyc differ
+diff --git a/common_src/model/utils/__pycache__/base_points.cpython-39.pyc b/common_src/model/utils/__pycache__/base_points.cpython-39.pyc
+index 77a853f..1595ebf 100644
+Binary files a/common_src/model/utils/__pycache__/base_points.cpython-39.pyc and b/common_src/model/utils/__pycache__/base_points.cpython-39.pyc differ
+diff --git a/common_src/model/utils/__pycache__/box3d_utils.cpython-39.pyc b/common_src/model/utils/__pycache__/box3d_utils.cpython-39.pyc
+index 712d0ce..469a8c8 100644
+Binary files a/common_src/model/utils/__pycache__/box3d_utils.cpython-39.pyc and b/common_src/model/utils/__pycache__/box3d_utils.cpython-39.pyc differ
+diff --git a/common_src/model/utils/__pycache__/centerpoint_bbox_coders.cpython-39.pyc b/common_src/model/utils/__pycache__/centerpoint_bbox_coders.cpython-39.pyc
+index 136232a..97af3e6 100644
+Binary files a/common_src/model/utils/__pycache__/centerpoint_bbox_coders.cpython-39.pyc and b/common_src/model/utils/__pycache__/centerpoint_bbox_coders.cpython-39.pyc differ
+diff --git a/common_src/model/utils/__pycache__/lidar_box3d.cpython-39.pyc b/common_src/model/utils/__pycache__/lidar_box3d.cpython-39.pyc
+index c1a4bc2..7d52b5d 100644
+Binary files a/common_src/model/utils/__pycache__/lidar_box3d.cpython-39.pyc and b/common_src/model/utils/__pycache__/lidar_box3d.cpython-39.pyc differ
+diff --git a/common_src/model/utils/__pycache__/utils_func.cpython-39.pyc b/common_src/model/utils/__pycache__/utils_func.cpython-39.pyc
+index 8d6d6ef..dd4da61 100644
+Binary files a/common_src/model/utils/__pycache__/utils_func.cpython-39.pyc and b/common_src/model/utils/__pycache__/utils_func.cpython-39.pyc differ
+diff --git a/common_src/model/voxel_encoders/__pycache__/__init__.cpython-39.pyc b/common_src/model/voxel_encoders/__pycache__/__init__.cpython-39.pyc
+index 2d9549a..31ad08f 100644
+Binary files a/common_src/model/voxel_encoders/__pycache__/__init__.cpython-39.pyc and b/common_src/model/voxel_encoders/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/model/voxel_encoders/__pycache__/pillar_encoder.cpython-39.pyc b/common_src/model/voxel_encoders/__pycache__/pillar_encoder.cpython-39.pyc
+index e4ded56..bbd851a 100644
+Binary files a/common_src/model/voxel_encoders/__pycache__/pillar_encoder.cpython-39.pyc and b/common_src/model/voxel_encoders/__pycache__/pillar_encoder.cpython-39.pyc differ
+diff --git a/common_src/model/voxel_encoders/__pycache__/utils.cpython-39.pyc b/common_src/model/voxel_encoders/__pycache__/utils.cpython-39.pyc
+index 756cac0..dd3a911 100644
+Binary files a/common_src/model/voxel_encoders/__pycache__/utils.cpython-39.pyc and b/common_src/model/voxel_encoders/__pycache__/utils.cpython-39.pyc differ
+diff --git a/common_src/ops/__pycache__/__init__.cpython-39.pyc b/common_src/ops/__pycache__/__init__.cpython-39.pyc
+index 314d7ba..b7bbdc8 100644
+Binary files a/common_src/ops/__pycache__/__init__.cpython-39.pyc and b/common_src/ops/__pycache__/__init__.cpython-39.pyc differ
+diff --git a/common_src/ops/__pycache__/iou3d.cpython-39.pyc b/common_src/ops/__pycache__/iou3d.cpython-39.pyc
+index 371d2f3..4f595c3 100644
+Binary files a/common_src/ops/__pycache__/iou3d.cpython-39.pyc and b/common_src/ops/__pycache__/iou3d.cpython-39.pyc differ
+diff --git a/common_src/ops/__pycache__/points_in_boxes.cpython-39.pyc b/common_src/ops/__pycache__/points_in_boxes.cpython-39.pyc
+index ac21893..eab02d9 100644
+Binary files a/common_src/ops/__pycache__/points_in_boxes.cpython-39.pyc and b/common_src/ops/__pycache__/points_in_boxes.cpython-39.pyc differ
+diff --git a/common_src/ops/__pycache__/scatter_points.cpython-39.pyc b/common_src/ops/__pycache__/scatter_points.cpython-39.pyc
+index 112240b..25c4183 100644
+Binary files a/common_src/ops/__pycache__/scatter_points.cpython-39.pyc and b/common_src/ops/__pycache__/scatter_points.cpython-39.pyc differ
+diff --git a/common_src/ops/__pycache__/voxelize.cpython-39.pyc b/common_src/ops/__pycache__/voxelize.cpython-39.pyc
+index a269d28..bd0fafa 100644
+Binary files a/common_src/ops/__pycache__/voxelize.cpython-39.pyc and b/common_src/ops/__pycache__/voxelize.cpython-39.pyc differ
+diff --git a/common_src/tools/slurm_train.sh b/common_src/tools/slurm_train.sh
+index 760d544..1416b71 100644
+--- a/common_src/tools/slurm_train.sh
++++ b/common_src/tools/slurm_train.sh
+@@ -10,8 +10,8 @@
+ #SBATCH --gpus-per-task=1
+ #SBATCH --account=education-me-courses-ro47020
+ #SBATCH --mail-type=END
+-#SBATCH --output=outputs/slurm_centerpoint_ro47020_%j.out
+-#SBATCH --error=outputs/slurm_centerpoint_ro47020_%j.err
++#SBATCH --output=outputs/slurm_logs/slurm_centerpoint_ro47020_%j.out
++#SBATCH --error=outputs/slurm_logs/slurm_centerpoint_ro47020_%j.err
+ 
+ module load 2024r1 miniconda3/4.12.0 cuda/12.5
+ 
+@@ -22,6 +22,6 @@ conda activate amp
+ previous=$(nvidia-smi --query-accounted-apps='gpu_utilization,mem_utilization,max_memory_usage,time' --format='csv' | /usr/bin/tail -n '+2')
+ nvidia-smi
+ 
+-srun python -u common_src/tools/train.py exp_id=centerpoint_baseline_db_try_slurm batch_size=4 num_workers=2 epochs=1
++srun python -u common_src/tools/train.py exp_id=centerpoint_baseline_db_try_slurm batch_size=4 num_workers=2 epochs=12
+ 
+ nvidia-smi --query-accounted-apps='gpu_utilization,mem_utilization,max_memory_usage,time' --format='csv' | /usr/bin/grep -v -F "$previous"
