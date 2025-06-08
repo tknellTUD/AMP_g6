@@ -60,7 +60,7 @@ class ViewOfDelft(Dataset):
         return len(self.sample_list)
 
     def __getitem__(self, idx):
-        print(f"IDX: {idx}")
+        # print(f"IDX: {idx}")
         num_frame = self.sample_list[idx]
         vod_frame_data = FrameDataLoader(kitti_locations=self.vod_kitti_locations,
                                          frame_number=num_frame)
@@ -106,9 +106,9 @@ class ViewOfDelft(Dataset):
         gt_labels_3d = torch.tensor(gt_labels_3d, dtype=torch.float32)  # Ensure float32 data type
         
         stereo_camera = vod_frame_data.image #[H, W, C]
-        print(f"Stereo camera shape: {stereo_camera.shape}")
+        # print(f"Stereo camera shape: {stereo_camera.shape}")
         stereo_camera = torch.tensor(stereo_camera, dtype=torch.float32)  # Ensure float32 data type  # [1, C, H, W] for num cams 1
-        print(f"Stereo camera tensor shape: {stereo_camera.shape}")
+        # print(f"Stereo camera tensor shape: {stereo_camera.shape}")
         return dict(
             lidar_data = lidar_data,
             stereo_camera = stereo_camera,
@@ -224,7 +224,7 @@ def extract_lidar_uvz_features(lidar_pc_lidar, transform_matrix, projection_matr
     Returns:
         output (np.ndarray): shape (N_valid, 1 + 1 + C), i.e., [u, z, features]
     """
-    print(f"T_camera_LiDAR:\n{transform_matrix}")
+    # print(f"T_camera_LiDAR:\n{transform_matrix}")
     print(f"P_camera:\n{projection_matrix}")
     H, W = 1216,1936
     N = lidar_pc_lidar.shape[0]

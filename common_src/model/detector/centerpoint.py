@@ -120,13 +120,13 @@ class CenterPoint(L.LightningModule):
         # Image path (skip if img_data is None)
         # if img_data is not None:
         # 1. Extract image features
-        print(f"Image data shape: {img_data[0].shape}")
+        # print(f"Image data shape: {img_data[0].shape}")
 
         img_data = torch.stack(img_data, dim=0)  # Stack the list of image tensors along a new dimension
 
-        print(f"Image data shape after stacking: {img_data.shape}")  # [B, N, C, H, W]
+        # print(f"Image data shape after stacking: {img_data.shape}")  # [B, N, C, H, W]
         image_queries, H_feat, W_feat = self.img_features(img_data)  # [B, N, H, W, C] -> [B*N*H, W, C]
-        print(f"Image queries shape: {image_queries.shape}")  # [B*N*H, W, C]
+        # print(f"Image queries shape: {image_queries.shape}")  # [B*N*H, W, C]
         W = image_queries[2]
         lidar_features= []
         for pc in lidar_data:
@@ -138,13 +138,13 @@ class CenterPoint(L.LightningModule):
                 feature_dim=4,
                 z_max=100.0,
                 num_D_bins=320))
-            print(f"Extracted LiDAR features shape: {lidar_features[-1].shape}")  # [1, 1, 1, W, D, C]
+            # print(f"Extracted LiDAR features shape: {lidar_features[-1].shape}")  # [1, 1, 1, W, D, C]
         # lidar_features = self.extract_lidar_uvz_features_torch(lidar_pc_lidar, frame_idx, (H_feat, W_feat), feature_dim=4)
 
         binned_lidar = torch.stack(lidar_features, dim=0)  # [B, W, D, C]
         B_lidar, W_lidar, D_lidar, C_lidar = binned_lidar.shape
         lidar_seq = binned_lidar.view(B_lidar*W_lidar, D_lidar, C_lidar)
-        print(f"Binned LiDAR shape: {binned_lidar.shape}")
+        # print(f"Binned LiDAR shape: {binned_lidar.shape}")
 
         # Perform positional encoding on LiDAR features
         lidar_seq += self.depth_pos_encoding  # Add depth positional encoding
@@ -156,14 +156,14 @@ class CenterPoint(L.LightningModule):
         # Perform cross-attention between image queries and LiDAR sequence
         fused_bev = self.hat(image_queries, lidar_seq)
         delta = self.zero_init_layer_norm(fused_bev)  # Apply zero-initialized LayerNorm
-        fused_bev = image_queries + delta  # Add residual connection
+        fused_bev = lidar_seq + delta  # Add residual connection
         BW, H, C = fused_bev.shape
         W = 320
         B = BW // W
         fused_bev = fused_bev.view(B, C, H, W)  # Reshape to [B, C, H, W]
-        print(f"Fused BEV shape: {fused_bev.shape}")  # [B, C, H, W]
+        # print(f"Fused BEV shape: {fused_bev.shape}")  # [B, C, H, W]
         backbone_feats = self.backbone(fused_bev)
-        print(f"Backbone features shape: {backbone_feats[0].shape}")  # [B, C_out, H_feat, W_feat]
+        # print(f"Backbone features shape: {backbone_feats[0].shape}")  # [B, C_out, H_feat, W_feat]
         neck_feats = self.neck(backbone_feats)
         ret_dict = self.head(neck_feats)
         return ret_dict
@@ -174,7 +174,7 @@ class CenterPoint(L.LightningModule):
         num_frame = batch['metas'][0]['num_frame']
         gt_label_3d = batch['gt_labels_3d']
         gt_bboxes_3d = batch['gt_bboxes_3d']
-        print(f"Training step batch input img_data shape; {img_data[0].shape}")
+        # print(f"Training step batch input img_data shape; {img_data[0].shape}")
         ret_dict = self._model_forward(lidar_pts, img_data, num_frame)
         loss_input = [gt_bboxes_3d, gt_label_3d, ret_dict]
         
@@ -209,8 +209,8 @@ class CenterPoint(L.LightningModule):
         metas = batch['metas']
         gt_label_3d = batch['gt_labels_3d']
         gt_bboxes_3d = batch['gt_bboxes_3d']
-        print(f"Validation step batch input img_data shape; {img_data[0].shape}")
-        print(f"Validation step batch length: {len(batch['lidar_data'])}, num_frame: {num_frame}") 
+        # print(f"Validation step batch input img_data shape; {img_data[0].shape}")
+        # print(f"Validation step batch length: {len(batch['lidar_data'])}, num_frame: {num_frame}") 
         ret_dict = self._model_forward(lidar_pts, img_data, num_frame)
         loss_input = [gt_bboxes_3d, gt_label_3d, ret_dict]
         
@@ -274,15 +274,15 @@ class CenterPoint(L.LightningModule):
 
         # Step 1: Transform to camera frame
         lidar_pc_camera = transform_matrix.dot(lidar_pc_lidar.T).T  # shape: (N, 4)  # [N, 4 + C]
-        print("Min x, y, z values for lidar_pc_lidar:", lidar_pc_lidar[:, :3].min(axis=0))
-        print("Max x, y, z values for lidar_pc_lidar:", lidar_pc_lidar[:, :3].max(axis=0))
-        print("Min x, y, z values for lidar_pc_camera:", lidar_pc_camera[:, :3].min(axis=0))
-        print("Max x, y, z values for lidar_pc_camera:", lidar_pc_camera[:, :3].max(axis=0))
+        # print("Min x, y, z values for lidar_pc_lidar:", lidar_pc_lidar[:, :3].min(axis=0))
+        # print("Max x, y, z values for lidar_pc_lidar:", lidar_pc_lidar[:, :3].max(axis=0))
+        # print("Min x, y, z values for lidar_pc_camera:", lidar_pc_camera[:, :3].min(axis=0))
+        # print("Max x, y, z values for lidar_pc_camera:", lidar_pc_camera[:, :3].max(axis=0))
         
         # Step 2: Project to image plane
         # pixels = (projection_matrix @ lidar_pc_camera.T).T  # [N, 3]
         pixels = (projection_matrix @ lidar_pc_camera.T).T
-        print("Pixels shape:", pixels.shape)
+        # print("Pixels shape:", pixels.shape)
         z = pixels[:, 2]  # Depth in camera frame
         valid_mask = z > 0
         u = (pixels[:, 0] / z).astype(int)
@@ -298,7 +298,7 @@ class CenterPoint(L.LightningModule):
         z_valid = z[final_mask].reshape(-1, 1)  # Extract valid z values
 
         num_W_bins = image_shape[1]  # W
-        print(f"Number of width bins: {num_W_bins}")
+        # print(f"Number of width bins: {num_W_bins}")
         num_D_bins = 76  # D
         z_max = 100
         depth_bin_size = z_max / num_D_bins
@@ -403,7 +403,7 @@ class CenterPoint(L.LightningModule):
         # 4.  Pre-allocate bins  (B, C, Z, W, D) = (1,1,1,W,D)
         # ------------------------------------------------------------------
         num_W_bins = W
-        print(f"Number of width bins: {num_W_bins}")
+        # print(f"Number of width bins: {num_W_bins}")
         depth_bin = z_max / num_D_bins
 
         binned_features = torch.zeros((num_W_bins, num_D_bins, feature_dim),
@@ -439,7 +439,7 @@ class CenterPoint(L.LightningModule):
         # Reshape to [B, N, H, W, C] where B=1, N=1 (single camera), H=H, W=W, C=C
 
         height_queries = img_feats.contiguous().view(B * W_feat, H_feat, C_out)
-        print(f"Height queries shape: {height_queries.shape}")
+        # print(f"Height queries shape: {height_queries.shape}")
         return height_queries, H_feat, W_feat
 
     

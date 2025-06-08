@@ -24,6 +24,6 @@ class HeightAssociationTransformer(nn.Module):
 
         fused, _ = self.attn(img_q, lidar_k, lidar_v)
         fused = self.norm(fused + img_seq)
-        print(f"fused shape: {fused.shape}")
+        # print(f"fused shape: {fused.shape}")
 
         return fused

@@ -25,7 +25,7 @@ class ImageBackbone(nn.Module):
         """
         B, H, W, C = imgs.shape
         imgs = imgs.permute(0, 3, 1, 2)  # reshape to [B, H, W, 1, C]
-        print(f"imgs shape after reshape: {imgs.shape}")
+        # print(f"imgs shape after reshape: {imgs.shape}")
         feats = self.encoder(imgs)
         feats = self.output_conv(feats)  # [B, C_out, H_feat, W_feat]
         feats = nn.functional.interpolate(feats, size=(320, 320), mode='bilinear', align_corners=False)
