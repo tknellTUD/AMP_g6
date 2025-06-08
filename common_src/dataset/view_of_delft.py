@@ -55,7 +55,7 @@ class ViewOfDelft(Dataset):
                  data_root = 'data/view_of_delft', 
                  sequential_loading=False,
                  split = 'train',
-                 segmentation_generation=False):
+                 segmentation_generation=False): ### REMEMBER TO CHANGE THIS BACK TO FALSE
         super().__init__()
         
         self.data_root = data_root
@@ -188,8 +188,8 @@ class ViewOfDelft(Dataset):
         # Step 1: Transform to camera frame
         lidar_points = lidar_points.copy()
         coords = lidar_points[:, :3]
-        intensity = lidar_points[:, 3:4]  # (N, 1)
-        
+        # intensity = lidar_points[:, 3:4]  # (N, 1)
+        intensity = np.ones((lidar_points.shape[0], 1), dtype=np.float32) # Removing intensity to test if this fixes performance issues
         lidar_hom = np.concatenate([coords, np.ones((coords.shape[0], 1))], axis=1)  # (N, 4)
         points_cam = (transform_matrix @ lidar_hom.T).T  # (N, 4)
 
@@ -420,23 +420,33 @@ def decode_sem_scores_compressed(quantized):
     full = np.concatenate([bg, probs], axis=-1)  # (H, W, 4)
     return full
 
+def show_diff_classification(full_seg, reconst_seg, feature=0):
+    diff = np.abs(full_seg[:, :, feature] - reconst_seg[:, :, feature])
+
+    plt.imshow(diff, cmap='hot')
+    plt.colorbar(label='|Original - Reconstructed| (Background)')
+    plt.title(f"Error in Reconstructed Background Score (Class {feature})")
+    plt.tight_layout()
+    plt.savefig(f"outputs/background_diff_heatmap_class{feature}.png")
+    plt.close()
+
 if __name__ == "__main__":
     # Test if Segmentation works
-    dataset = ViewOfDelft(segmentation_generation=False)
+    dataset = ViewOfDelft(segmentation_generation=True)
     id = 658
 
-    #save_sem_scores_compressed(dataset)
+    save_sem_scores_compressed(dataset)
 
     ### Timing Segmentation
     # start = time.time()
-    data_658 = dataset[id]
+    # data_658 = dataset[id]
     # end = time.time()
     # print(f"Time to load sample {id}: {end - start:.2f} seconds")
 
     ### Saving visualizations
     # image = data_658["image"]
-    sem_scores = data_658["sem_scores"]
-    painted_pc = data_658["lidar_data"]
+    # sem_scores = data_658["sem_scores"]
+    # painted_pc = data_658["lidar_data"]
     # 
     # save_painted_projection(painted_pc, id, "xy")
     # The images get saved under outputs/
