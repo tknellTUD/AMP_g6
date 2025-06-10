@@ -36,6 +36,7 @@ neck:
   in_channels: [128, 256, 512]
   upsample_strides: [1, 2, 4]
   out_channels: [256, 256, 256]
+  #num_layers: 2
 
 head:
   in_channels: 768 # sum(128, 128, 128)

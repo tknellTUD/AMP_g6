@@ -49,10 +49,12 @@ class SECOND(nn.Module):
                        bias=False),)
                 block.append(BatchNorm2d(out_channels[i], eps=1e-3, momentum=0.01))
                 block.append(nn.ReLU(inplace=True))
+                if j < layer_num - 1:
+                    block.append(Dropout2d(p=0.1))
 
             block = nn.Sequential(*block)
-            attention = CBAM(out_channels[i])
-            block = nn.Sequential(block, attention)
+            #attention = CBAM(out_channels[i])
+            #block = nn.Sequential(block, attention)
             blocks.append(block)
 
 

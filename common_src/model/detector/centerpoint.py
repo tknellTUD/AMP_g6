@@ -22,6 +22,7 @@ from common_src.model.middle_encoders import PointPillarsScatter
 from common_src.model.backbones import resnet_0
 from common_src.model.backbones import SECOND
 from common_src.model.necks import SECONDFPN
+from common_src.model.necks.bifpn import BiFPN
 from common_src.model.heads import CenterHead
 
 class CenterPoint(L.LightningModule):
