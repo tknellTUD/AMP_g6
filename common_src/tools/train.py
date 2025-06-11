@@ -18,12 +18,15 @@ from torch.utils.data import DataLoader
 from common_src.model.detector import CenterPoint
 from common_src.dataset import ViewOfDelft, collate_vod_batch
 
+import torch.multiprocessing as mp
+from torchvision.models.segmentation import deeplabv3_resnet101
+
 @hydra.main(version_base=None, config_path='../config', config_name='train')    
 def train(cfg: DictConfig)-> None:
     L.seed_everything(cfg.seed, workers=True)
     
-    train_dataset = ViewOfDelft(data_root=cfg.data_root, split='train')
-    val_dataset = ViewOfDelft(data_root=cfg.data_root, split='val')
+    train_dataset = ViewOfDelft(data_root=cfg.data_root, split='train', seg_model=seg_model)
+    val_dataset = ViewOfDelft(data_root=cfg.data_root, split='val', seg_model=seg_model)
     
     train_dataloader = DataLoader(train_dataset, 
                                   batch_size=cfg.batch_size, 
@@ -78,4 +81,6 @@ def train(cfg: DictConfig)-> None:
     wandb.finish()
     
 if __name__ == '__main__':
+    mp.set_start_method('spawn', force=True)
+    seg_model = deeplabv3_resnet101(pretrained=True).eval().to('cuda')
     train()

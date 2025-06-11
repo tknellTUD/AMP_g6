@@ -1,7 +1,7 @@
 defaults: 
   - model: centerpoint
   - _self_
-exp_id: centerpoint_default_test
+exp_id: centerpoint_default
 
 seed: 47020
 gpus: [0] # will change in code: torch.cuda.device_count()
