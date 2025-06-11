@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name="centerpoint_team6_ro47020"
+#SBATCH --job-name="PPcentperpoint_ro47020"
 #SBATCH --partition=gpu-a100-small
 #SBATCH --time=4:00:00
 
@@ -10,8 +10,8 @@
 #SBATCH --gpus-per-task=1
 #SBATCH --account=education-me-courses-ro47020
 #SBATCH --mail-type=END
-#SBATCH --output=outputs/slurm_logs/slurm_centerpoint_ro47020_%j.out
-#SBATCH --error=outputs/slurm_logs/slurm_centerpoint_ro47020_%j.err
+#SBATCH --output=outputs/slurm_PPcenterpoint_ro47020_%j.out
+#SBATCH --error=outputs/slurm_PPcenterpoint_ro47020_%j.err
 
 module load 2024r1 miniconda3/4.12.0 cuda/12.5
 
@@ -22,6 +22,6 @@ conda activate amp
 previous=$(nvidia-smi --query-accounted-apps='gpu_utilization,mem_utilization,max_memory_usage,time' --format='csv' | /usr/bin/tail -n '+2')
 nvidia-smi
 
-srun python -u common_src/tools/train.py exp_id=cp_2dropout_larger batch_size=4 num_workers=2 epochs=10
+srun python -u common_src/tools/train.py exp_id=centerpoint_pp_mobilenet_db_try_slurm batch_size=4 num_workers=2 epochs=6
 
 nvidia-smi --query-accounted-apps='gpu_utilization,mem_utilization,max_memory_usage,time' --format='csv' | /usr/bin/grep -v -F "$previous"
