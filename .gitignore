@@ -2,3 +2,4 @@ data/
 final_assignment/
 lightning_logs/
 outputs/
+__pycache__/
