@@ -3,3 +3,7 @@ final_assignment/
 lightning_logs/
 outputs/
 common_src/dataset/sem_cache
+{model_1}
+{model_2}
+common_src/dataset/deeplabv3_resnet101_coco-586e9e4e.pth
+common_src/dataset/resnet101-63fe2227.pth
