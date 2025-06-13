@@ -25,6 +25,7 @@ from torchvision.models.segmentation import deeplabv3_resnet101
 def train(cfg: DictConfig)-> None:
     L.seed_everything(cfg.seed, workers=True)
     
+    seg_model = deeplabv3_resnet101(pretrained=True).eval().to('cuda')
     train_dataset = ViewOfDelft(data_root=cfg.data_root, split='train', seg_model=seg_model)
     val_dataset = ViewOfDelft(data_root=cfg.data_root, split='val', seg_model=seg_model)
     
@@ -82,5 +83,5 @@ def train(cfg: DictConfig)-> None:
     
 if __name__ == '__main__':
     mp.set_start_method('spawn', force=True)
-    seg_model = deeplabv3_resnet101(pretrained=True).eval().to('cuda')
+    
     train()

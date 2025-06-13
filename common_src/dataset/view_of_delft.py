@@ -136,8 +136,7 @@ class ViewOfDelft(Dataset):
                 
                     gt_bboxes_3d_list.append(np.concatenate([bbox3d_locs, bbox3d_dims, bbox3d_rot], axis=0))
 
-        lidar_data = torch.tensor(lidar_data)
-        
+
         if gt_bboxes_3d_list == []:
             gt_labels_3d = np.array([0])
             gt_bboxes_3d = np.zeros((1,7))
@@ -151,9 +150,10 @@ class ViewOfDelft(Dataset):
             origin=(0.5, 0.5, 0))
         
         gt_labels_3d = torch.tensor(gt_labels_3d)
-        
+        # print(f"painted_lidar is a {'Tensor' if isinstance(painted_lidar, torch.Tensor) else 'NumPy array'}")
+        # print(f"sem_scores is a {'Tensor' if isinstance(sem_scores, torch.Tensor) else 'NumPy array'}")
         return dict(
-            lidar_data = lidar_data,
+            lidar_data = painted_lidar,
             gt_labels_3d = gt_labels_3d,
             gt_bboxes_3d = gt_bboxes_3d,
             meta = dict(num_frame = num_frame),
@@ -178,7 +178,7 @@ class ViewOfDelft(Dataset):
             sem_scores[:, :, 15],  # person
         ], axis=-1)  # final shape: [H, W, 4]
         sem_time = time.time()
-        print(f"Segmentation time: {sem_time - start_time:.2f} seconds")
+        # print(f"Segmentation time: {sem_time - start_time:.2f} seconds")
         #sem_scores_reduced = polish_segmentation(sem_scores_reduced, save_visualization=False, device='cuda')
         return sem_scores_reduced
     
@@ -245,7 +245,7 @@ class ViewOfDelft(Dataset):
         # Step 6: Concatenate original features + segmentation
         painted = np.hstack([coords, intensity, seg])  # (N, 4 + C)
 
-        return painted
+        return torch.tensor(painted, device='cuda')
 
     
 def save_image(image_np, id = 0, output_dir="outputs"):
@@ -495,7 +495,7 @@ def polish_segmentation(sem_scores, *, save_visualization=False, device="cuda"):
     # ------------------------------------------------------------------ #
     polish_start = time.time()
     sem_scores_tensor = torch.as_tensor(sem_scores, device=device, dtype=torch.float32)
-    print(f"Polishing segmentation on device: {device}")    
+    # print(f"Polishing segmentation on device: {device}")    
     sem_scores_copy   = sem_scores_tensor.clone()
 
     # Binary masks for the classes we care about
@@ -507,14 +507,14 @@ def polish_segmentation(sem_scores, *, save_visualization=False, device="cuda"):
 
     ## Connected components labelling
     labels, K = connected_components(pedestrian_mask)
-    print(f"Found {K} pedestrian blobs")
-    print(labels.shape)
+    # print(f"Found {K} pedestrian blobs")
+    # print(labels.shape)
     # bounding boxes
     ped_bboxes = []
     for k in range(1, K+1):
         ys, xs = np.nonzero(labels == k)
         ped_bboxes.append((ys.min(), xs.min(), ys.max(), xs.max()))
-    print(f"Bounding boxes for {K} pedestrian blobs: {ped_bboxes}")
+    # print(f"Bounding boxes for {K} pedestrian blobs: {ped_bboxes}")
     #print(labels)
     # ------------------------------------------------------------------ #
     # 2.  For each pedestrian blob, look for bicycle pixels directly below
@@ -577,14 +577,16 @@ def polish_segmentation(sem_scores, *, save_visualization=False, device="cuda"):
                 # Add the current blob mask to the cumulative mask
                 cumulative_blob_mask |= blob_mask
             
-    # Update bike and pedestrian scores for cumulative blob mask
-    sem_scores_copy[..., 1][cumulative_blob_mask] += sem_scores_copy[..., 3][cumulative_blob_mask]
-    sem_scores_copy[..., 3][cumulative_blob_mask] = 0.0
+    # Swap bike and pedestrian scores for cumulative blob mask
+    temp = sem_scores_copy[..., 1][cumulative_blob_mask].clone()
+    sem_scores_copy[..., 1][cumulative_blob_mask] = sem_scores_copy[..., 3][cumulative_blob_mask]
+    sem_scores_copy[..., 3][cumulative_blob_mask] = temp
 
     # Move isolated cyclist pixels to background
     isolated_cyclist_mask = bicycle_mask & ~overlap_mask
-    sem_scores_copy[..., 0][isolated_cyclist_mask] += sem_scores_copy[..., 1][isolated_cyclist_mask]
-    sem_scores_copy[..., 1][isolated_cyclist_mask] = 0.0
+    temp = sem_scores_copy[..., 0][isolated_cyclist_mask].clone()
+    sem_scores_copy[..., 0][isolated_cyclist_mask] = sem_scores_copy[..., 1][isolated_cyclist_mask]
+    sem_scores_copy[..., 1][isolated_cyclist_mask] = temp
 
     polished_segmentation = torch.nan_to_num(sem_scores_copy, nan=0.0).cpu().numpy()
 
@@ -607,7 +609,7 @@ def polish_segmentation(sem_scores, *, save_visualization=False, device="cuda"):
         plt.savefig("outputs/segmentation_comparison.png")
         plt.close()
 
-    print(f"Polishing took {time.time() - polish_start:.2f} seconds")
+    # print(f"Polishing took {time.time() - polish_start:.2f} seconds")
     return polished_segmentation
 
 @njit
@@ -716,8 +718,7 @@ if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
 
     # Test if Segmentation works
-
-    seg_model = deeplabv3_mobilenet_v3_large(pretrained=True).eval().to('cuda')
+    seg_model = deeplabv3_resnet101(pretrained=True).eval().to('cuda')
     dataset = ViewOfDelft(segmentation_generation=True, seg_model=seg_model, device='cuda')
     
     # # Find an image with both bicycles and pedestrians
@@ -759,5 +760,5 @@ if __name__ == "__main__":
     # # Save the combined visualization
     # save_combined_visualization(image, sem_scores, updated_scores=updated_scores, id=id, output_dir="outputs")
 
-    sem_scores = decode_sem_scores_compressed(np.load("common_src/dataset/sem_cache/09641.npz")["sem_scores"])
-    save_segmentation_map(sem_scores, id=0, output_dir="outputs")
+    # sem_scores = decode_sem_scores_compressed(np.load("common_src/dataset/sem_cache/09641.npz")["sem_scores"])
+    # save_segmentation_map(sem_scores, id=0, output_dir="outputs")

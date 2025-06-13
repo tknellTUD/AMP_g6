@@ -21,7 +21,7 @@ import torch.multiprocessing as mp
 from torchvision.models.segmentation import deeplabv3_resnet101
 
 @hydra.main(version_base=None, config_path='../config', config_name="test")
-def eval(cfg: DictConfig, seg_model) -> None:
+def eval(cfg: DictConfig) -> None:
     print('Evaluating model...')
     L.seed_everything(cfg.seed, workers=True)
     
