@@ -22,6 +22,6 @@ conda activate amp
 previous=$(nvidia-smi --query-accounted-apps='gpu_utilization,mem_utilization,max_memory_usage,time' --format='csv' | /usr/bin/tail -n '+2')
 nvidia-smi
 
-srun python -u common_src/tools/train.py exp_id=centerpoint_pp_segmentation_swap batch_size=4 num_workers=2 epochs=15
+srun python -u common_src/tools/train.py exp_id=centerpoint_pp_segmentation_argmax_dim5 batch_size=4 num_workers=2 epochs=12
 
 nvidia-smi --query-accounted-apps='gpu_utilization,mem_utilization,max_memory_usage,time' --format='csv' | /usr/bin/grep -v -F "$previous"

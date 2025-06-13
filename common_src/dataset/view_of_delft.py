@@ -250,8 +250,14 @@ class ViewOfDelft(Dataset):
         # output_path = os.path.join("outputs", f"projected_lidar_{num_frame}.png")
         # Image.fromarray(projected_image).save(output_path)
 
-        # Step 6: Concatenate original features + segmentation
-        painted = np.hstack([coords, intensity, seg])  # (N, 4 + C)
+        # ──────────────────────────────────────────────────────────────
+        # 6.  Collapse the 4-D segmentation vector to (class-id, prob)
+        #     painted → (N, 5) :  x y z  class_id  prob
+        # ──────────────────────────────────────────────────────────────
+        class_id  = np.argmax(seg, axis=1).astype(np.float32)   # (N,)  0-3
+        class_prob = np.max(seg, axis=1)                        # (N,)  [0,1]
+
+        painted = np.column_stack([coords, class_id, class_prob])   # (N, 5)
 
         if self.device == 'cuda':
             painted = torch.tensor(painted, device='cuda', dtype=torch.float32)
