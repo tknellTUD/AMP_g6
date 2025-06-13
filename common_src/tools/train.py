@@ -45,7 +45,7 @@ def train(cfg: DictConfig)-> None:
             dirpath=osp.join(cfg.output_dir, "checkpoints"),
             filename='ep{epoch}-'+cfg.exp_id,
             save_last=True,
-            monitor='validation/entire_area/mAP',
+            monitor='validation/ROI/mAP',
             mode='max',
             auto_insert_metric_name=False,
             save_top_k=cfg.save_top_model,

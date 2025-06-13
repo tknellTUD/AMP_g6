@@ -54,9 +54,9 @@ class ViewOfDelft(Dataset):
                  data_root = 'data/view_of_delft', 
                  sequential_loading=False,
                  split = 'train',
-                 segmentation_generation=False,
-                 seg_model = False,
-                 device = 'cuda'): ### REMEMBER TO CHANGE THIS BACK TO FALSE
+                 segmentation_generation=False,### REMEMBER TO CHANGE THIS BACK TO FALSE
+                 seg_model = False, 
+                 device = 'cuda'): 
         
         super().__init__()
         
@@ -72,8 +72,10 @@ class ViewOfDelft(Dataset):
         self.vod_kitti_locations = KittiLocations(root_dir = data_root)
 
         # Loading the segmentation model
+        self.device = device
         self.seg_model = seg_model
-        
+        self.segmentation_generation = segmentation_generation
+
         self.seg_transform = transforms.Compose([
             transforms.Resize((512, 1024)),
             transforms.ToTensor(),
@@ -107,13 +109,15 @@ class ViewOfDelft(Dataset):
                 raise ValueError("Neither 'sem_scores' nor 'sem_ids' found in npz")
         else:
             sem_scores = self.get_segmentation(image_data)
-            sem_scores = polish_segmentation(sem_scores, save_visualization=False, device='cuda')
+            sem_scores = polish_segmentation(sem_scores, save_visualization=False, device=self.device)
         # Painting the pointcloud
         transforms = FrameTransformMatrix(vod_frame_data)
         t_camera_lidar = transforms.t_camera_lidar
         P = transforms.camera_projection_matrix
-        painted_lidar = self.paint_lidar_points(lidar_data, sem_scores, t_camera_lidar, P, image_data=image_data, num_frame=num_frame)
-
+        if not self.segmentation_generation:
+            painted_lidar = self.paint_lidar_points(lidar_data, sem_scores, t_camera_lidar, P, image_data=image_data, num_frame=num_frame)
+        else: 
+            painted_lidar = lidar_data.copy()
         gt_labels_3d_list = []
         gt_bboxes_3d_list = []
         if self.split != 'test':
@@ -152,6 +156,7 @@ class ViewOfDelft(Dataset):
         gt_labels_3d = torch.tensor(gt_labels_3d)
         # print(f"painted_lidar is a {'Tensor' if isinstance(painted_lidar, torch.Tensor) else 'NumPy array'}")
         # print(f"sem_scores is a {'Tensor' if isinstance(sem_scores, torch.Tensor) else 'NumPy array'}")
+        print(f"painted_lidar shape: {painted_lidar.shape}")
         return dict(
             lidar_data = painted_lidar,
             gt_labels_3d = gt_labels_3d,
@@ -164,7 +169,9 @@ class ViewOfDelft(Dataset):
         start_time = time.time()
         image = Image.fromarray(image_array)
         # Getting the segmentation
-        input_tensor = self.seg_transform(image).unsqueeze(0).to('cuda')
+        input_tensor = self.seg_transform(image).unsqueeze(0)
+        if self.device == 'cuda':
+            input_tensor = input_tensor.to(self.device)
         with torch.no_grad():
             sem_scores = self.seg_model(input_tensor)['out'].softmax(dim=1)  # [1, C, H, W]
         sem_scores = sem_scores.squeeze(0).permute(1, 2, 0).cpu().numpy()     # [H, W, C]
@@ -183,6 +190,7 @@ class ViewOfDelft(Dataset):
         return sem_scores_reduced
     
     def paint_lidar_points(self, lidar_points, sem_scores, transform_matrix, P, image_data=None, num_frame=0):
+        print(f"shape before painting: {lidar_points.shape}")
         """
         lidar_points: (N, 4) - [x, y, z, intensity]
         sem_scores: (H, W, C)
@@ -245,7 +253,9 @@ class ViewOfDelft(Dataset):
         # Step 6: Concatenate original features + segmentation
         painted = np.hstack([coords, intensity, seg])  # (N, 4 + C)
 
-        return torch.tensor(painted, device='cuda')
+        if self.device == 'cuda':
+            painted = torch.tensor(painted, device='cuda', dtype=torch.float32)
+        return painted
 
     
 def save_image(image_np, id = 0, output_dir="outputs"):
@@ -442,9 +452,9 @@ def save_sem_scores_compressed(dataset, output_dir="common_src/dataset/sem_cache
             print(f"Saved {idx+1}/{len(dataset)} compressed segmentations")
 
         if idx % 50 == 0:
+                image = frame_data["image"]  # shape: (H, W, 3)
                 seg_map = np.argmax(quantized, axis=-1).astype(np.uint16)
-                np.savez_compressed(os.path.join(output_dir, f"argmax_segmentation_{idx}.npz"), seg_map=seg_map)
-                save_segmentation_map(quantized, idx)
+                save_combined_visualization(image, sem_scores, id = frame_id)
 
         avg_time += time.time() - img_time
         print(f"Average processing time per frame: {avg_time / (idx+1)} seconds")
@@ -487,13 +497,14 @@ def polish_segmentation(sem_scores, *, save_visualization=False, device="cuda"):
     ── Class layout (index in last dim) ──
         0 → background
         1 → bicycle / cyclist
-        2 → car                     (only used for a debug overlay)
+        2 → car                     
         3 → pedestrian
     """
     # ------------------------------------------------------------------ #
     # 0.  Torch bookkeeping
     # ------------------------------------------------------------------ #
     polish_start = time.time()
+
     sem_scores_tensor = torch.as_tensor(sem_scores, device=device, dtype=torch.float32)
     # print(f"Polishing segmentation on device: {device}")    
     sem_scores_copy   = sem_scores_tensor.clone()
@@ -514,7 +525,7 @@ def polish_segmentation(sem_scores, *, save_visualization=False, device="cuda"):
     for k in range(1, K+1):
         ys, xs = np.nonzero(labels == k)
         ped_bboxes.append((ys.min(), xs.min(), ys.max(), xs.max()))
-    # print(f"Bounding boxes for {K} pedestrian blobs: {ped_bboxes}")
+    print(f"Bounding boxes for {K} pedestrian blobs: {ped_bboxes}")
     #print(labels)
     # ------------------------------------------------------------------ #
     # 2.  For each pedestrian blob, look for bicycle pixels directly below
@@ -536,14 +547,14 @@ def polish_segmentation(sem_scores, *, save_visualization=False, device="cuda"):
         # Search window: a slim rectangle just below the pedestrian blob
         blob_height = max_r - min_r + 1
         blob_width  = max_c - min_c + 1
-        if blob_height/ blob_width < 2:  # too narrow, skip
+        if blob_height/ blob_width < 3:  # too narrow, skip
             centre_c = (min_c + max_c) // 2
 
-            search_min_r = max_r - blob_height // 3  # start at the blob’s bottom row
+            search_min_r = max_r - blob_height // 2  # start at the blob’s bottom row
             search_max_r = min(height - 1, max_r + blob_height // 2)  # 25% extra below
 
-            search_min_c = max(0, centre_c - blob_height // 2)
-            search_max_c = min(width - 1, centre_c + blob_height // 2)
+            search_min_c = max(0, centre_c - blob_height // 3 * 2)
+            search_max_c = min(width - 1, centre_c + blob_height // 3 * 2)
 
             # Draw a green line (car class) on the bounding box
             # sem_scores_copy[search_min_r:search_max_r + 1, search_min_c, 2] = 1.0  # left vertical line
@@ -552,6 +563,17 @@ def polish_segmentation(sem_scores, *, save_visualization=False, device="cuda"):
             # sem_scores_copy[search_max_r, search_min_c:search_max_c + 1, 2] = 1.0  # bottom horizontal line
 
             bbox_sl = np.s_[search_min_r:search_max_r + 1, search_min_c:search_max_c + 1]
+
+            # Continue early if the bike pixels are not below the pedestrian
+            if search_max_r <= max_r:          # nothing below the pedestrian at all
+                continue
+
+            below_slice = np.s_[max_r + 1 : search_max_r + 1,   # rows strictly under max_r
+                                search_min_c : search_max_c + 1]
+
+            if not bicycle_mask[below_slice].any():             # all zeros → no bike below
+                continue
+
             
             # ------------------------------------------------------------------
             # 2.  Boolean mask of bicycle pixels *inside* the pedestrian box
@@ -677,9 +699,8 @@ def connected_components(mask):
     return labels, lbl-1
 
 def save_combined_visualization(image, original_scores, updated_scores=None, id=0, output_dir="outputs"):
-    # Convert original and updated segmentation maps to RGB
+    # Convert original segmentation map to RGB
     original_seg_map = np.argmax(original_scores, axis=-1)
-    updated_seg_map = np.argmax(updated_scores, axis=-1)
 
     class_colors = np.array([
         [128, 128, 128],  # grey (background)
@@ -689,25 +710,34 @@ def save_combined_visualization(image, original_scores, updated_scores=None, id=
     ], dtype=np.uint8)
 
     original_rgb = class_colors[original_seg_map]
-    updated_rgb = class_colors[updated_seg_map]
 
     # Convert to PIL images
     image_pil = PILImage.fromarray(image)
     original_pil = PILImage.fromarray(original_rgb)
-    updated_pil = PILImage.fromarray(updated_rgb)
 
-    # Resize all images to the same width
+    # Resize images to the same width
     target_width = 1024  # Set a target width for resizing
     image_pil = image_pil.resize((target_width, int(image_pil.height * target_width / image_pil.width)))
     original_pil = original_pil.resize((target_width, int(original_pil.height * target_width / original_pil.width)))
-    updated_pil = updated_pil.resize((target_width, int(updated_pil.height * target_width / updated_pil.width)))
 
-    # Combine images vertically
-    total_height = image_pil.height + original_pil.height + updated_pil.height
-    combined_image = PILImage.new("RGB", (target_width, total_height))
-    combined_image.paste(image_pil, (0, 0))
-    combined_image.paste(original_pil, (0, image_pil.height))
-    combined_image.paste(updated_pil, (0, image_pil.height + original_pil.height))
+    if updated_scores is not None:
+        updated_seg_map = np.argmax(updated_scores, axis=-1)
+        updated_rgb = class_colors[updated_seg_map]
+        updated_pil = PILImage.fromarray(updated_rgb)
+        updated_pil = updated_pil.resize((target_width, int(updated_pil.height * target_width / updated_pil.width)))
+
+        # Combine images vertically
+        total_height = image_pil.height + original_pil.height + updated_pil.height
+        combined_image = PILImage.new("RGB", (target_width, total_height))
+        combined_image.paste(image_pil, (0, 0))
+        combined_image.paste(original_pil, (0, image_pil.height))
+        combined_image.paste(updated_pil, (0, image_pil.height + original_pil.height))
+    else:
+        # Combine only image and original scores vertically
+        total_height = image_pil.height + original_pil.height
+        combined_image = PILImage.new("RGB", (target_width, total_height))
+        combined_image.paste(image_pil, (0, 0))
+        combined_image.paste(original_pil, (0, image_pil.height))
 
     # Save combined image as JPEG
     combined_image.save(os.path.join(output_dir, f"combined_visualization_{id}.jpeg"), "JPEG")
@@ -718,8 +748,12 @@ if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
 
     # Test if Segmentation works
-    seg_model = deeplabv3_resnet101(pretrained=True).eval().to('cuda')
-    dataset = ViewOfDelft(segmentation_generation=True, seg_model=seg_model, device='cuda')
+    # seg_model = deeplabv3_resnet101(pretrained=True).eval().to('cuda')
+    # dataset = ViewOfDelft(segmentation_generation=True, seg_model=seg_model, device='cuda')
+
+    # CPU modus
+    seg_model = deeplabv3_resnet101(pretrained=True).eval()
+    dataset = ViewOfDelft(segmentation_generation=True, seg_model=seg_model, device='cpu')
     
     # # Find an image with both bicycles and pedestrians
     # id = -1
@@ -734,11 +768,9 @@ if __name__ == "__main__":
 
     # if id == -1:
     #     raise ValueError("No image with both cyclists and pedestrians found in the dataset.")
-    # id = 640
-    
-    # save_sem_scores_compressed(dataset)
+    # id = 658
 
-    # ## Timing Segmentation
+    #     ## Timing Segmentation
     # start = time.time()
     # data_658 = dataset[id]
     # end = time.time()
@@ -749,16 +781,19 @@ if __name__ == "__main__":
     # sem_scores = data_658["sem_scores"]
     # painted_pc = data_658["lidar_data"]
     
-    # save_painted_projection(painted_pc, id, "xy")
-    # # The images get saved under outputs/
-    # save_segmentation_map(sem_scores, id)
-    # #save_image(image, id=id, output_dir="outputs")
+    # # save_painted_projection(painted_pc, id, "xy")
+    # # # The images get saved under outputs/
+    # # save_segmentation_map(sem_scores, id)
+    # # #save_image(image, id=id, output_dir="outputs")
 
-    # updated_scores = polish_segmentation(sem_scores)
-    # # Combine the image, original segmentation, and updated segmentation into one JPEG
+    # updated_scores = polish_segmentation(sem_scores, device="cpu")
 
     # # Save the combined visualization
     # save_combined_visualization(image, sem_scores, updated_scores=updated_scores, id=id, output_dir="outputs")
 
-    # sem_scores = decode_sem_scores_compressed(np.load("common_src/dataset/sem_cache/09641.npz")["sem_scores"])
-    # save_segmentation_map(sem_scores, id=0, output_dir="outputs")
+    # # sem_scores = decode_sem_scores_compressed(np.load("common_src/dataset/sem_cache/09641.npz")["sem_scores"])
+    # # save_segmentation_map(sem_scores, id=0, output_dir="outputs")
+
+    
+    
+    save_sem_scores_compressed(dataset)
